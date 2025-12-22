@@ -2,7 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../screens/store/data/chip_data.dart';
+import '../account/data/avatar_data.dart';
 
 class AccountScreen extends StatefulWidget {
   const AccountScreen({super.key});
@@ -13,8 +15,10 @@ class AccountScreen extends StatefulWidget {
 
 class _AccountScreenState extends State<AccountScreen> with SingleTickerProviderStateMixin{
   // User Data State
-  String displayName = "Loading...";
-  String uniqueHandle = "@loading";
+  String displayName = "";
+  String uniqueHandle = "";
+
+  String _avatarId = "avatar_1";
 
   String selectedChipId = "default_blue";
   List<String> ownedChipIds = ["default_blue"];
@@ -45,44 +49,50 @@ class _AccountScreenState extends State<AccountScreen> with SingleTickerProvider
   @override
   void dispose() {
     _rotateController.dispose();
-    _userDataSubscription?.cancel(); // Stop listening when we leave
+    _userDataSubscription?.cancel();
     super.dispose();
   }
 
-  // --- THE NEW LOGIC: LISTEN TO FIREBASE ---
   void _setupRealtimeListener() {
     final User? user = _auth.currentUser;
-    if (user == null) return; // Not logged in
+    if (user == null) return;
 
-    // Listen to changes at 'users/{uid}'
-    _userDataSubscription = _db.child('users/${user.uid}').onValue.listen((event) {
+    _userDataSubscription = _db.child('users/${user.uid}').onValue.listen((event) async {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
 
-      if (data != null && mounted) {
-        setState(() {
-          // Update UI with Cloud Data
-          displayName = data['handle'] ?? "Player"; // Using handle as display name for now
-          uniqueHandle = data['unique_id'] ?? "#0000"; // Showing the unique ID
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        _avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
+      });
 
-          totalCoins = data['coins'] ?? 0;
-          totalWins = data['matches_won'] ?? 0;
-          totalMatches = data['matches_played'] ?? 0;
-          currentStreak = data['streak'] ?? 0;
+      _userDataSubscription = _db.child('users/${user.uid}').onValue.listen((event) {
+        if (event.snapshot.exists) {
+          final data = event.snapshot.value as Map;
+          if (mounted) {
+            setState(() {
+              displayName = data['name'] ?? "Unknown";
+              uniqueHandle = data['handle'] ?? "@unknown";
+              totalCoins = data['coins'] ?? 0;
+              totalWins = data['matches_won'] ?? 0;
+              totalMatches = data['matches_played'] ?? 0;
+              currentStreak = data['streak'] ?? 0;
+              _avatarId = data['avatar_id'] ?? "avatar_1";
 
-          selectedChipId = data['selected_chip'] ?? "default_blue";
+              selectedChipId = data['selected_chip'] ?? "default_blue";
 
-          if (data['owned_chips'] != null) {
-            ownedChipIds = List<String>.from(data['owned_chips']);
+              if (data['owned_chips'] != null) {
+                ownedChipIds = List<String>.from(data['owned_chips']);
+              }
+              if (data['country'] != null) selectedCountry = data['country'];
+              if (data['flag'] != null) selectedFlag = data['flag'];
+
+              // Calculate Level based on Wins (Example Logic)
+              currentLevel = 1 + (totalWins ~/ 5); // Level up every 5 wins
+            });
           }
-
-          if (data['country'] != null) selectedCountry = data['country'];
-          if (data['flag'] != null) selectedFlag = data['flag'];
-
-          // Calculate Level based on Wins (Example Logic)
-          currentLevel = 1 + (totalWins ~/ 5); // Level up every 5 wins
-        });
-      }
-    });
+        }
+     });
+   });
   }
 
   // --- ACTIONS (SAVE TO CLOUD) ---
@@ -110,37 +120,41 @@ class _AccountScreenState extends State<AccountScreen> with SingleTickerProvider
 
   @override
   Widget build(BuildContext context) {
+
+    AvatarItem currentAvatar = allAvatars.firstWhere((a) => a.id == _avatarId, orElse: () => allAvatars[0]);
     return SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
           children: [
-            // HEADER PROFILE PIC
-            Stack(
-              alignment: Alignment.bottomRight,
-              children: [
-                GestureDetector(
-                  onTap: _showAvatarPicker,
-                  child: Container(
+            const Text("MY PROFILE", style: TextStyle(color: Colors.white54, letterSpacing: 2, fontSize: 12)),
+            const SizedBox(height: 20),
+            Center(
+              child: Stack(
+                alignment: Alignment.bottomRight,
+                children: [
+                  Container(
                     padding: const EdgeInsets.all(4),
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      border: Border.all(color: getRankColor(), width: 3),
-                      boxShadow: [BoxShadow(color: getRankColor().withOpacity(0.4), blurRadius: 20)],
+                      border: Border.all(color: const Color(0xFFFFD700), width: 2),
+                      boxShadow: [BoxShadow(color: const Color(0xFFFFD700).withOpacity(0.3), blurRadius: 20)],
                     ),
                     child: CircleAvatar(
-                      radius: 50,
-                      backgroundColor: Colors.white10,
-                      child: const Icon(Icons.face, size: 60, color: Colors.white),
+                      radius: 60,
+                      backgroundColor: currentAvatar.color, // Dynamic Color
+                      child: Icon(currentAvatar.icon, size: 50, color: Colors.white), // Dynamic Icon
                     ),
                   ),
-                ),
-                Container(padding: const EdgeInsets.all(6), decoration: const BoxDecoration(color: Colors.blueAccent, shape: BoxShape.circle), child: const Icon(Icons.edit, color: Colors.white, size: 16)),
-              ],
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: const BoxDecoration(color: Colors.blueAccent, shape: BoxShape.circle),
+                    child: const Icon(Icons.edit, color: Colors.white, size: 20),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 15),
-
-            // NAMES
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [

@@ -82,6 +82,30 @@ class AuthService {
     await prefs.clear();
   }
 
+  Future<bool> deleteAccount() async {
+    try {
+      User? user = _auth.currentUser;
+      if (user == null) return false;
+
+      // 1. Delete User Data from Database
+      await _db.child('users/${user.uid}').remove();
+
+      // 2. Delete User from Firebase Auth
+      await user.delete();
+
+      // 3. Clear Local Data
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.clear();
+
+      return true;
+    } catch (e) {
+      print("Delete Account Error: $e");
+      // Note: Firebase often requires a fresh login to delete an account.
+      // You might need to prompt the user to re-authenticate if this fails.
+      return false;
+    }
+  }
+
   // --- DATABASE SETUP ---
   Future<void> _initializeUserData(User user, {String? handle, bool isGuest = false}) async {
     final prefs = await SharedPreferences.getInstance();

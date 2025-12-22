@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart'; // Import the storage package
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../database/auth_service.dart';
+import '../authorize/login_screen.dart';
 
 class OptionsScreen extends StatefulWidget {
   const OptionsScreen({super.key});
@@ -9,7 +11,7 @@ class OptionsScreen extends StatefulWidget {
 }
 
 class _OptionsScreenState extends State<OptionsScreen> {
-  // Default values (used if no save file is found)
+  final AuthService _authService = AuthService();
   double _soundVolume = 50;
   double _musicVolume = 50;
   bool _vibrationsEnabled = true;
@@ -21,6 +23,13 @@ class _OptionsScreenState extends State<OptionsScreen> {
   void initState() {
     super.initState();
     _loadSettings(); // Load saved data when screen starts
+  }
+
+  void _goToLogin() {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const LoginScreen()),
+          (route) => false,
+    );
   }
 
   // --- 1. LOAD SETTINGS FROM STORAGE ---
@@ -112,7 +121,10 @@ class _OptionsScreenState extends State<OptionsScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 15),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-              onPressed: () {},
+              onPressed: () async {
+                await _authService.signOut();
+                if (mounted) _goToLogin();
+              },
               child: const Text("Sign Out", style: TextStyle(color: Colors.white, fontSize: 16)),
             ),
           ),
@@ -128,7 +140,21 @@ class _OptionsScreenState extends State<OptionsScreen> {
                   side: const BorderSide(color: Colors.redAccent),
                 ),
               ),
-              onPressed: () {},
+              onPressed: () async {
+                // IMPLEMENTED DELETE ACCOUNT
+                // Optional: Add a confirmation dialog here before deleting
+                bool success = await _authService.deleteAccount();
+                if (success && mounted) {
+                  _goToLogin();
+                } else {
+                  // Show error if re-auth is needed
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text("Login again to delete account."))
+                    );
+                  }
+                }
+              },
               child: const Text("Delete Account", style: TextStyle(color: Colors.redAccent, fontSize: 16, fontWeight: FontWeight.bold)),
             ),
           ),

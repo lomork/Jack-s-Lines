@@ -4,13 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/services.dart';
+import 'package:confetti/confetti.dart';
+
 import '../../screens/store/data/chip_data.dart';
 import '../game/offline/ai_logic.dart';
 import '../game/smart_deck/deck_manager.dart';
 import '../../sounds/sound_manager.dart';
 import '../../database/online_service.dart';
-
+import '../account/data/avatar_data.dart';
+import 'arranged_board.dart';
 
 class GameBoard extends StatefulWidget {
   final String difficulty;
@@ -22,352 +24,377 @@ class GameBoard extends StatefulWidget {
 }
 
 class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
-  late GameChip myChip;
+  // Game State
+  // FIX: removed 'late' and assigned default to prevent crash if load is slow
+  GameChip myChip = allGameChips[0];
   bool isLoading = true;
   String opponentName = "@Opponent";
+  String opponentAvatarId = "avatar_1";
+  String opponentFlag = "🏳️"; // Default Flag
 
-  // Game State
   List<String> deck = [];
   final List<String> playerHand = [];
   final List<String> opponentHand = [];
-  final List<int> boardState = List.filled(100, 0);
+  final List<int> boardState = List.filled(100, 0); // 0:Empty, 1:P1, 2:P2
   List<String> boardLayout = [];
+  final Set<int> cornerIndices = {0, 9, 90, 99};
 
   // Win Logic
-  int playerScore = 0;
-  int aiScore = 0;
-  List<List<int>> lockedSequences = [];
-
-  bool isGameOver = false;
   bool isPlayerTurn = true;
+  bool isGameOver = false;
+  List<List<int>> winningSequences = [];
 
+  // Interaction
   String? selectedCard;
-  String? lastPlayedCard;
-  String? lastAiPlayedCard;
   int? lastPlacedChipIndex;
 
-  final List<int> cornerIndices = [0, 9, 90, 99];
-  Timer? _turnTimer;
-  int _secondsRemaining = 60;
-  String aiStatus = "Waiting...";
-
-  //database
+  // Online
   OnlineService? _onlineService;
+  int myPlayerValue = 1; // 1 = Me, 2 = Enemy
+
+  // Searching UI State
+  late AnimationController _textPulseController;
+  Timer? _searchTimer;
+  int _seconds = 0;
+  int _statusIndex = 0;
+  final List<String> _statusMessages = [
+    "Connecting...",
+    "Finding Opponent...",
+    "Shuffling Deck...",
+    "Starting Match..."
+  ];
+  late ConfettiController _confettiController;
+
+  // --- NEW: TURN TIMER ---
+  Timer? _turnTimer;
+  int _turnTimeRemaining = 60;
 
   @override
   void initState() {
     super.initState();
-    _generateRandomBoard();
+    _loadMyChip();
+    _loadManualBoard();
+
+    _textPulseController = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat(reverse: true);
+    _confettiController = ConfettiController(duration: const Duration(seconds: 2));
+
     if (widget.isOnline) {
+      _startSearchAnimation();
       _startOnlineGame();
     } else {
-      _initializeGame(); // Normal offline start
+      _startOfflineGame();
     }
   }
 
   @override
   void dispose() {
-    _turnTimer?.cancel();
+    _textPulseController.dispose();
+    _confettiController.dispose();
+    _searchTimer?.cancel();
+    _turnTimer?.cancel(); // Kill game timer
+    _onlineService?.leaveGame();
     super.dispose();
   }
 
-  Future<void> _initializeGame() async {
+  void _loadManualBoard() {
+    setState(() {
+      boardLayout = List.from(ArrangedBoard.layout);
+    });
+  }
+
+  Future<void> _loadMyChip() async {
     final prefs = await SharedPreferences.getInstance();
     String chipId = prefs.getString('selected_chip_id') ?? "default_blue";
-    myChip = allGameChips.firstWhere((c) => c.id == chipId, orElse: () => allGameChips[0]);
-
-    // Board is already generated in initState
-    deck = DeckManager.buildDeck();
-    _dealInitialHands();
-
     if (mounted) {
-      setState(() => isLoading = false); // Show Board
-      _startTimer();
+      setState(() {
+        myChip = allGameChips.firstWhere((c) => c.id == chipId, orElse: () => allGameChips[0]);
+      });
     }
   }
 
-  Future<void> _cancelOnlineSearch() async {
-    await _onlineService?.cancelSearch();
-    if(mounted) Navigator.pop(context); // Go back to menu
-  }
-
-  Future<void> _startOnlineGame() async {
-    final prefs = await SharedPreferences.getInstance();
-    String chipId = prefs.getString('selected_chip_id') ?? "default_blue";
-    myChip = allGameChips.firstWhere((c) => c.id == chipId, orElse: () => allGameChips[0]);
-
-    deck = DeckManager.buildDeck();
-
-    _onlineService = OnlineService();
-    _onlineService!.onGameStateChanged = (data) {
-      if (!mounted) return;
-
-      // 1. Update Board
-      if (data['board'] != null) {
-        List<dynamic> cloudBoard = data['board'];
-        for(int i=0; i<100; i++) boardState[i] = cloudBoard[i];
-      }
-
-      // 2. Check Turn
-      String turn = data['turn'];
-      String myRole = _onlineService!.myRole;
-      bool isMyTurn = (turn == myRole);
-
-      // 3. Game Started?
-      if (data['status'] == 'playing') {
-        setState(() {
-          isLoading = false; // Match Found! Show Board.
-          isPlayerTurn = isMyTurn;
-          opponentName = (myRole == 'host') ? (data['guest_name'] ?? "Guest") : data['host_name'];
-
-          if (isMyTurn && _secondsRemaining == 60) {
-            _startTimer();
-          }
-        });
-      }
-    };
-
-    // Start Searching (This might take time)
-    await _onlineService!.findMatch();
-  }
-
-  void _generateRandomBoard() {
-    List<String> boardCards = [];
-    List<String> suits = ["S", "C", "H", "D"];
-    List<String> boardRanks = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "Q", "K", "A"];
-    for (int i = 0; i < 2; i++) {
-      for (var s in suits) { for (var r in boardRanks) { boardCards.add("$r$s"); } }
-    }
-    boardCards.shuffle();
-    boardLayout = List.filled(100, "");
-    int cardIndex = 0;
-    for (int i = 0; i < 100; i++) {
-      if (cornerIndices.contains(i)) boardLayout[i] = "FREE";
-      else { boardLayout[i] = boardCards[cardIndex]; cardIndex++; }
-    }
-  }
-
-  void _dealInitialHands() {
-    playerHand.clear();
-    opponentHand.clear();
-    for (int i = 0; i < 7; i++) {
-      playerHand.add(deck.removeLast());
-      opponentHand.add(deck.removeLast());
-    }
-  }
-
-  void _startTimer() {
+  // --- TIMER LOGIC ---
+  void _startTurnTimer() {
     _turnTimer?.cancel();
-    if (isGameOver) return;
-    setState(() => _secondsRemaining = 60);
+    setState(() => _turnTimeRemaining = 60);
+
     _turnTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) return;
       setState(() {
-        if (_secondsRemaining > 0) _secondsRemaining--;
-        else {
-          _turnTimer?.cancel();
-          if (isPlayerTurn) _triggerDisqualification();
+        if (_turnTimeRemaining > 0) {
+          _turnTimeRemaining--;
+        } else {
+          _handleTimeout();
         }
       });
     });
   }
 
-  void _triggerDisqualification() {
-    setState(() => isGameOver = true);
-    _showEndGameDialog("TIME'S UP!", "You ran out of time.", false);
+  void _handleTimeout() {
+    _turnTimer?.cancel();
+    if (isGameOver) return;
+
+    // Timeout Logic: Who lost?
+    // If it's my turn and I timed out -> I lose.
+    // If it's enemy turn and they timed out -> They lose (I win).
+
+    // Note: In a real server-authoritative game, the server decides this.
+    // For this client-side logic, we just handle local state.
+
+    bool iLost = isPlayerTurn;
+    isGameOver = true;
+
+    _showGameOverDialog(!iLost, isTimeout: true);
   }
 
-  // --- PLAYER MOVE ---
-  void _onCardTap(String card) {
-    if (!isPlayerTurn || isGameOver) return;
-    HapticFeedback.selectionClick();
-    SoundManager.click(); // <--- NEW SOUND
-    setState(() => selectedCard = (selectedCard == card) ? null : card);
+  // --- ONLINE LOGIC ---
+  Future<void> _startOnlineGame() async {
+    _onlineService = OnlineService();
+    _onlineService!.onGameStateChanged = (data) {
+      if (!mounted) return;
+      if (data['status'] == 'playing') {
+        _stopSearchAnimation();
+
+        String myRole = _onlineService!.myRole;
+        int newPlayerValue = (myRole == 'host') ? 1 : 2;
+
+        setState(() {
+          isLoading = false;
+          myPlayerValue = newPlayerValue;
+
+          bool wasPlayerTurn = isPlayerTurn;
+          isPlayerTurn = (data['turn'] == myRole);
+
+          // Reset Timer on Turn Change
+          if (wasPlayerTurn != isPlayerTurn) {
+            _startTurnTimer();
+          }
+
+          if (myRole == 'host') {
+            opponentAvatarId = data['guest_avatar'] ?? "avatar_1";
+            opponentName = data['guest_name'] ?? "Guest";
+            // opponentFlag = data['guest_flag'] ?? "🏳️"; // If you added flags to DB
+          } else {
+            opponentAvatarId = data['host_avatar'] ?? "avatar_1";
+            opponentName = data['host_name'] ?? "Host";
+            // opponentFlag = data['host_flag'] ?? "🏳️";
+          }
+
+          if (data['board'] != null) {
+            List<dynamic> cloudBoard = data['board'];
+            for(int i=0; i<100; i++) {
+              if (cloudBoard[i] is int) boardState[i] = cloudBoard[i];
+            }
+          }
+          if (data['last_move'] != null) lastPlacedChipIndex = data['last_move']['index'];
+
+          checkForWin();
+        });
+
+        if (playerHand.isEmpty) {
+          _dealInitialHands();
+          _startTurnTimer(); // Start first timer
+        }
+      }
+    };
+    await _onlineService!.findMatch();
   }
 
+  void _dealInitialHands() {
+    deck = DeckManager.createFullDeck();
+    deck.shuffle();
+    for (int i = 0; i < 7; i++) {
+      playerHand.add(deck.removeLast());
+    }
+  }
+
+  void _startOfflineGame() {
+    _dealInitialHands();
+    setState(() {
+      isLoading = false;
+      isPlayerTurn = true;
+      opponentName = "Offline AI";
+      opponentFlag = "🤖";
+    });
+    _startTurnTimer();
+  }
+
+  // --- SEARCH UI ANIMATION ---
+  void _startSearchAnimation() {
+    _searchTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) return;
+      setState(() {
+        _seconds++;
+        if (_seconds % 3 == 0) _statusIndex = (_statusIndex + 1) % _statusMessages.length;
+      });
+    });
+  }
+
+  void _stopSearchAnimation() { _searchTimer?.cancel(); }
+
+  void _cancelSearch() {
+    _onlineService?.cancelSearch();
+    Navigator.pop(context);
+  }
+
+  // --- GAMEPLAY LOGIC ---
   void _onBoardTap(int index) {
     if (!isPlayerTurn || isGameOver || selectedCard == null) return;
     if (cornerIndices.contains(index)) return;
 
-    bool isJack = selectedCard!.startsWith("J");
-    bool isRedJack = isJack && (selectedCard!.contains("H") || selectedCard!.contains("D"));
-    bool isBlackJack = isJack && (selectedCard!.contains("C") || selectedCard!.contains("S"));
-
     String targetCard = boardLayout[index];
-    bool moveSuccessful = false;
+    bool isTwoEyed = DeckManager.isTwoEyedJack(selectedCard!);
+    bool isOneEyed = DeckManager.isOneEyedJack(selectedCard!);
+    bool success = false;
 
-    if (!isJack) {
-      if (targetCard == selectedCard && boardState[index] == 0) {
-        setState(() { boardState[index] = 1; lastPlacedChipIndex = index; });
-        moveSuccessful = true;
+    if (isTwoEyed) {
+      if (boardState[index] == 0) success = true;
+    } else if (isOneEyed) {
+      if (boardState[index] != 0 && boardState[index] != myPlayerValue) {
+        if (!_isChipLocked(index)) { _executeMove(index, 0); return; }
+        else { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cannot remove completed sequence!"))); return; }
       }
-    } else if (isBlackJack) {
-      if (boardState[index] == 0) {
-        setState(() { boardState[index] = 1; lastPlacedChipIndex = index; });
-        moveSuccessful = true;
-      }
-    } else if (isRedJack) {
-      if (boardState[index] == 2) {
-        if (_isChipLocked(index)) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Cannot remove a completed sequence!")));
-          return;
-        }
-        setState(() { boardState[index] = 0; lastPlacedChipIndex = null; });
-        moveSuccessful = true;
-        HapticFeedback.heavyImpact();
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Red Jacks remove OPPONENT chips!")));
-      }
+    } else {
+      if (targetCard == selectedCard && boardState[index] == 0) success = true;
     }
 
-    if (moveSuccessful) {
-      HapticFeedback.lightImpact();
-      SoundManager.place();
+    if (success) _executeMove(index, myPlayerValue);
+  }
+
+  void _executeMove(int index, int value) {
+    HapticFeedback.lightImpact();
+
+    if (widget.isOnline) {
+      _onlineService?.sendMove(index, selectedCard!, value);
+      setState(() {
+        playerHand.remove(selectedCard);
+        selectedCard = null;
+        if (deck.isNotEmpty) playerHand.add(deck.removeLast());
+        isPlayerTurn = false;
+      });
+      _startTurnTimer(); // Restart for opponent
+    } else {
+      setState(() {
+        boardState[index] = value;
+        lastPlacedChipIndex = value == 0 ? null : index;
+        playerHand.remove(selectedCard);
+        selectedCard = null;
+        if (deck.isNotEmpty) playerHand.add(deck.removeLast());
+      });
       _finishTurn(isPlayer: true);
     }
   }
 
-  void _finishTurn({required bool isPlayer}) {
-    setState(() {
-      if (isPlayer) {
-        lastPlayedCard = selectedCard;
-        playerHand.remove(selectedCard);
-        selectedCard = null;
-        playerHand.add(DeckManager.drawSmartCard(deck, boardState, boardLayout, widget.difficulty, 1));
-        _checkScores(1);
-        if (playerScore >= 2) { _handleWin(true); return; }
-
-        isPlayerTurn = false;
-        aiStatus = "Thinking...";
-        _startAiTurn();
-      } else {
-        _checkScores(2);
-        if (aiScore >= 2) { _handleWin(false); return; }
-
-        isPlayerTurn = true;
-        aiStatus = "Your Turn";
-        _startTimer();
-      }
-    });
-  }
-
-  Future<void> _startAiTurn() async {
-    _turnTimer?.cancel();
-    await Future.delayed(const Duration(milliseconds: 1000));
-    if (!mounted) return;
-
-    Map<String, dynamic> aiMove = AiLogic.getMove(widget.difficulty, opponentHand, boardState, boardLayout, cornerIndices, lockedSequences);
-
-    if (aiMove.isEmpty) {
-      setState(() {
-        aiStatus = "Trading card...";
-        opponentHand.removeAt(0);
-        opponentHand.add(DeckManager.drawSmartCard(deck, boardState, boardLayout, widget.difficulty, 2));
-      });
-    } else {
-      String card = aiMove['card'];
-      int index = aiMove['index'];
-
-      setState(() {
-        lastAiPlayedCard = card;
-        if (aiMove['type'] == 'remove') {
-          boardState[index] = 0;
-          aiStatus = "Blocked you!";
-          SoundManager.place();
-        } else {
-          boardState[index] = 2;
-          lastPlacedChipIndex = index;
-          aiStatus = "My move.";
-          SoundManager.place();
-        }
-        opponentHand.remove(card);
-        opponentHand.add(DeckManager.drawSmartCard(deck, boardState, boardLayout, widget.difficulty, 2));
-      });
-      HapticFeedback.mediumImpact();
-    }
-
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (!mounted) return;
-    _finishTurn(isPlayer: false);
-  }
-
-  void _checkScores(int playerId) {
-    for (int r = 0; r < 10; r++) _verifyLine(r*10, 1, 10, playerId);
-    for (int c = 0; c < 10; c++) _verifyLine(c, 10, 10, playerId);
-    for (int r=0; r<=5; r++) for (int c=0; c<=5; c++) _verifyLine((r*10)+c, 11, 5, playerId);
-    for (int r=0; r<=5; r++) for (int c=4; c<10; c++) _verifyLine((r*10)+c, 9, 5, playerId);
-  }
-
-  void _verifyLine(int start, int step, int count, int playerId) {
-    List<int> sequence = [];
-    for (int i = 0; i < count; i++) {
-      int index = start + (step * i);
-      if (index >= 100) break;
-
-      if (boardState[index] == playerId || cornerIndices.contains(index)) {
-        sequence.add(index);
-      } else {
-        _processPotentialSequence(sequence, playerId);
-        sequence = [];
-      }
-    }
-    _processPotentialSequence(sequence, playerId);
-  }
-
-  void _processPotentialSequence(List<int> sequence, int playerId) {
-    if (sequence.length >= 5) {
-      String id = sequence.take(5).join(",");
-      bool alreadyLocked = false;
-      for (var seq in lockedSequences) {
-        if (seq.join(",") == id) alreadyLocked = true;
-      }
-
-      if (!alreadyLocked) {
-        lockedSequences.add(sequence.take(5).toList());
-        if (playerId == 1) playerScore++;
-        else aiScore++;
-        HapticFeedback.vibrate();
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("${playerId == 1 ? 'You' : 'AI'} scored a sequence!"), backgroundColor: Colors.amber));
-      }
-    }
-  }
-
   bool _isChipLocked(int index) {
-    for (var seq in lockedSequences) {
-      if (seq.contains(index)) return true;
-    }
+    for (var seq in winningSequences) if (seq.contains(index)) return true;
     return false;
   }
 
-  void _handleWin(bool playerWon) {
-    setState(() => isGameOver = true);
+  void _finishTurn({required bool isPlayer}) {
+    checkForWin();
+    if (isGameOver) return;
 
-    // --- NEW: SAVE TO DATABASE ---
-    if (widget.isOnline && _onlineService != null) {
-      _onlineService!.recordGameEnd(
-          won: playerWon,
-          opponentName: opponentName
-      );
+    if (isPlayer) {
+      setState(() { isPlayerTurn = false; _startAiTurn(); });
+    } else {
+      setState(() { isPlayerTurn = true; });
     }
-    // -----------------------------
-
-    if (playerWon) SoundManager.win();
-
-    _showEndGameDialog(
-        playerWon ? "VICTORY!" : "DEFEAT",
-        playerWon ? "You got 2 Sequences! (+100 Coins)" : "AI got 2 Sequences. (+20 Coins)",
-        playerWon
-    );
+    _startTurnTimer(); // Restart timer for next turn
   }
 
-  void _showEndGameDialog(String title, String message, bool victory) {
+  Future<void> _startAiTurn() async {
+    // AI thinks for random time (1-3s)
+    int thinkTime = 1000 + Random().nextInt(2000);
+    await Future.delayed(Duration(milliseconds: thinkTime));
+    if(!mounted) return;
+
+    AiMove? move = AiLogic.findBestMove(
+        ["AC", "KD", "2H", "5S", "JC", "JD", "9H"],
+        boardState, boardLayout, widget.difficulty, 2
+    );
+
+    if (move != null) {
+      setState(() {
+        if (move.isRemoval) {
+          boardState[move.index] = 0;
+          lastPlacedChipIndex = null;
+        } else {
+          boardState[move.index] = 2;
+          lastPlacedChipIndex = move.index;
+        }
+      });
+    }
+    _finishTurn(isPlayer: false);
+  }
+
+  void checkForWin() {
+    winningSequences.clear();
+    for (int i=0; i<100; i++) {
+      if (i%10 <= 5) _checkLine(i, 1);
+      if (i < 50) _checkLine(i, 10);
+      if (i%10 <= 5 && i<50) _checkLine(i, 11);
+      if (i%10 >= 4 && i<50) _checkLine(i, 9);
+    }
+
+    int p1Count = 0;
+    int p2Count = 0;
+
+    for (var seq in winningSequences) {
+      int owner = 0;
+      for (int idx in seq) {
+        if (!cornerIndices.contains(idx)) {
+          owner = boardState[idx];
+          break;
+        }
+      }
+      if (owner == 1) p1Count++;
+      if (owner == 2) p2Count++;
+    }
+
+    if (p1Count >= 2 || p2Count >= 2) {
+      isGameOver = true;
+      _turnTimer?.cancel();
+      bool iWon = (myPlayerValue == 1 && p1Count >= 2) || (myPlayerValue == 2 && p2Count >= 2);
+      if (iWon) _confettiController.play();
+      if (widget.isOnline) _onlineService?.recordGameEnd(won: iWon, opponentName: opponentName);
+      _showGameOverDialog(iWon);
+    }
+  }
+
+  void _checkLine(int start, int step) {
+    List<int> currentSeq = [];
+    int? seqOwner;
+    for (int k=0; k<5; k++) {
+      int idx = start + (k * step);
+      int owner = boardState[idx];
+      bool isCorner = cornerIndices.contains(idx);
+      if (isCorner) { currentSeq.add(idx); continue; }
+      if (owner == 0) return;
+      if (seqOwner == null) { seqOwner = owner; } else if (owner != seqOwner) { return; }
+      currentSeq.add(idx);
+    }
+    winningSequences.add(currentSeq);
+  }
+
+  void _showGameOverDialog(bool iWon, {bool isTimeout = false}) {
+    String title = iWon ? "VICTORY!" : (isTimeout ? "TIME'S UP!" : "DEFEAT");
+    String message = isTimeout
+        ? (iWon ? "Opponent ran out of time!" : "You ran out of time!")
+        : (iWon ? "You are the master of Lines!" : "Better luck next time.");
+
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF222222),
-        title: Text(title, style: TextStyle(color: victory ? Colors.green : Colors.red, fontWeight: FontWeight.bold)),
-        content: Text(message, style: const TextStyle(color: Colors.white)),
+        backgroundColor: const Color(0xFF2C2C2C),
+        title: Text(title, style: TextStyle(color: iWon ? Colors.amber : Colors.red, fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (iWon) ConfettiWidget(confettiController: _confettiController) else const Icon(Icons.timer_off, size: 40, color: Colors.white54),
+            const SizedBox(height: 10),
+            Text(message, style: const TextStyle(color: Colors.white70)),
+          ],
+        ),
         actions: [
           TextButton(onPressed: () { Navigator.pop(context); Navigator.pop(context); }, child: const Text("EXIT"))
         ],
@@ -377,98 +404,30 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-
-    if (isLoading || boardLayout.isEmpty) {
-      if (widget.isOnline) {
-        return FindingMatchView(
-          onCancel: _cancelOnlineSearch,
-          onTimeout: () {
-            _cancelOnlineSearch();
-            _showEndGameDialog("Error", "Umm, I don't know what happened.\nTry again later.", false);
-          },
-        );
-      } else {
-        return const Scaffold(backgroundColor: Color(0xFF1E1E1E), body: Center(child: CircularProgressIndicator()));
-      }
-    }
-
-    if (isLoading) return const Scaffold(backgroundColor: Color(0xFF1E1E1E), body: Center(child: CircularProgressIndicator()));
-
-    Color timerColor = Colors.green;
-    if (_secondsRemaining <= 20) timerColor = Colors.orange;
-    if (_secondsRemaining <= 10) timerColor = Colors.red;
+    if (widget.isOnline && isLoading) return _buildSearchScreen();
+    // AvatarItem opponentAvatar = getAvatarById(opponentAvatarId);
 
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)]),
-        ),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              // --- LAYER 1: MAIN GAME AREA ---
-              Column(
-                children: [
-                  // HEADER
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(icon: const Icon(Icons.arrow_back_ios, color: Colors.white70), onPressed: () => Navigator.pop(context)),
-                        Column(
-                          children: [
-                            Text("@Opponent (${widget.difficulty})", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                            Text("AI Score: $aiScore | You: $playerScore", style: const TextStyle(color: Colors.amber, fontSize: 12)),
-                            Text(aiStatus, style: const TextStyle(color: Colors.cyanAccent, fontSize: 10)),
-                          ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.green)),
-                          child: Text("$_secondsRemaining s", style: const TextStyle(color: Colors.white)),
-                        )
-                      ],
-                    ),
-                  ),
-
-                  // OPPONENT HAND + AI LAST MOVE
-                  SizedBox(
-                    height: 50,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if(lastAiPlayedCard != null)
-                          Padding(padding: const EdgeInsets.only(right: 15), child: _buildPlayingCard(lastAiPlayedCard!, scale: 0.5)),
-                        SizedBox(
-                          width: 200,
-                          child: Center(
-                            child: ListView.builder(
-                              scrollDirection: Axis.horizontal, shrinkWrap: true, itemCount: opponentHand.length,
-                              itemBuilder: (context, index) => Align(widthFactor: 0.5, child: _buildCardBack(scale: 0.6)),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 5),
-
-                  // --- THE BOARD (RECTANGULAR ASPECT RATIO) ---
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4.0),
+      backgroundColor: const Color(0xFF151515),
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                _buildGameHeader(), // REPLACED TURN INDICATOR WITH HEADER
+                Expanded(
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: 0.70,
                       child: Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(color: const Color(0xFF222222), borderRadius: BorderRadius.circular(8), boxShadow: [const BoxShadow(color: Colors.black45, blurRadius: 15, offset: Offset(0, 10))]),
+                        margin: const EdgeInsets.all(8),
                         child: GridView.builder(
                           physics: const NeverScrollableScrollPhysics(),
                           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 10,
-                              childAspectRatio: 0.65, // Tall rectangles
-                              crossAxisSpacing: 1,
-                              mainAxisSpacing: 1
+                            crossAxisCount: 10,
+                            childAspectRatio: 0.70,
+                            crossAxisSpacing: 2,
+                            mainAxisSpacing: 2,
                           ),
                           itemCount: 100,
                           itemBuilder: (context, index) => _buildBoardSquare(index),
@@ -476,346 +435,319 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
-
-                  const SizedBox(height: 120),
-                ],
-              ),
-
-              // --- LAYER 2: BOTTOM CONTROLS (Floating on top) ---
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: SizedBox(
-                  height: 140, // Height for the arc
-                  child: Stack(
-                    alignment: Alignment.bottomCenter,
-                    children: [
-                      // Discard Pile (Far Left)
-                      Positioned(
-                        left: 20, bottom: 20,
-                        child: Column(
-                          children: [
-                            const Text("Played", style: TextStyle(color: Colors.white54, fontSize: 10)),
-                            const SizedBox(height: 4),
-                            lastPlayedCard == null ? Container(width: 45, height: 65, decoration: BoxDecoration(border: Border.all(color: Colors.white12))) : _buildPlayingCard(lastPlayedCard!, scale: 0.7, isFlat: true),
-                          ],
-                        ),
-                      ),
-
-                      // PLAYER HAND (CURVED / FANNED & ON TOP)
-                      Positioned(
-                        bottom: -20, // Push down slightly so they pop up nicely
-                        child: SizedBox(
-                          height: 150,
-                          width: MediaQuery.of(context).size.width,
-                          child: Stack(
-                            alignment: Alignment.bottomCenter,
-                            children: playerHand.asMap().entries.map((entry) {
-                              int idx = entry.key;
-                              int total = playerHand.length;
-                              String card = entry.value;
-                              bool isSelected = card == selectedCard;
-
-                              // ARC MATH
-                              double center = (total - 1) / 2;
-                              double relativePos = idx - center;
-                              double rotation = relativePos * 0.12;
-                              double yOffset = (relativePos.abs() * relativePos.abs()) * 3.0; // Arch curve
-                              double xOffset = relativePos * 35;
-
-                              return Positioned(
-                                bottom: 40 - yOffset + (isSelected ? 50 : 0), // POP UP Logic
-                                left: (MediaQuery.of(context).size.width / 2) + xOffset - 30,
-                                child: GestureDetector(
-                                  onTap: () => _onCardTap(card),
-                                  child: Transform.rotate(
-                                    angle: rotation,
-                                    child: _buildPlayingCard(card, scale: 1.1),
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
                 ),
-              ),
-            ],
-          ),
+                const SizedBox(height: 120), // More space for the fanned hand
+              ],
+            ),
+
+            // --- FANNED HAND (CURVED DECK) ---
+            Positioned(
+              bottom: -30,
+              left: 0,
+              right: 0,
+              height: 160,
+              child: _buildFannedHand(),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  // --- VISUALS ---
-  Widget _buildPlayingCard(String card, {double scale = 1.0, bool isFlat = false}) {
-    Color suitColor = (card.contains("H") || card.contains("D")) ? Colors.red[700]! : Colors.black;
-    String rank = card.substring(0, card.length - 1);
-    IconData suitIcon = _getSuitIcon(card);
+  // --- NEW HEADER: Player vs Opponent + Timer ---
+  Widget _buildGameHeader() {
+    AvatarItem opponentAvatar = getAvatarById(opponentAvatarId);
+    bool isUrgent = _turnTimeRemaining <= 10;
 
     return Container(
-      width: 50 * scale,
-      height: 75 * scale,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Color(0xFF252525),
+        border: Border(bottom: BorderSide(color: Colors.white10)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // Opponent Info
+          Row(
+            children: [
+              Stack(
+                alignment: Alignment.bottomRight,
+                children: [
+                  CircleAvatar(radius: 20, backgroundColor: opponentAvatar.color, child: Icon(opponentAvatar.icon, size: 20, color: Colors.white)),
+                  if (widget.isOnline) Text(opponentFlag, style: const TextStyle(fontSize: 14)), // Small Flag
+                ],
+              ),
+              const SizedBox(width: 10),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(opponentName, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  Text(isPlayerTurn ? "Waiting..." : "Playing", style: TextStyle(color: isPlayerTurn ? Colors.grey : Colors.greenAccent, fontSize: 10)),
+                ],
+              ),
+            ],
+          ),
+
+          // TIMER
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: isUrgent ? Colors.red.withOpacity(0.2) : Colors.black54,
+              borderRadius: BorderRadius.circular(15),
+              border: Border.all(color: isUrgent ? Colors.red : Colors.white24),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.timer, size: 16, color: isUrgent ? Colors.red : Colors.white70),
+                const SizedBox(width: 5),
+                Text(
+                    "$_turnTimeRemaining",
+                    style: TextStyle(color: isUrgent ? Colors.red : Colors.white, fontWeight: FontWeight.bold)
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- NEW: FANNED HAND BUILDER ---
+  Widget _buildFannedHand() {
+    if (playerHand.isEmpty) return const SizedBox();
+
+    double totalWidth = MediaQuery.of(context).size.width;
+    double cardWidth = 60;
+    double cardHeight = 90;
+    int count = playerHand.length;
+
+    int selectedIdx = -1;
+    if (selectedCard != null) {
+      selectedIdx = playerHand.indexOf(selectedCard!);
+    }
+
+    double centerX = totalWidth / 2;
+
+    return Stack(
+      alignment: Alignment.bottomCenter,
+      children: List.generate(count, (index) {
+        String card = playerHand[index];
+        bool isSelected = (index == selectedIdx);
+
+        // Standard Fan Logic
+        double relativeIndex = index - (count - 1) / 2;
+        double angle = relativeIndex * 0.08;
+        double xOffset = relativeIndex * 35; // Default spacing
+        double yOffset = (relativeIndex * relativeIndex) * 2.0; // Arch
+
+        // --- PART THE SEA LOGIC ---
+        // Pushes cards away from the selected card
+        if (selectedIdx != -1) {
+          if (index < selectedIdx) {
+            xOffset -= 40; // Push left group WAY left
+          } else if (index > selectedIdx) {
+            xOffset += 40; // Push right group WAY right
+          }
+        }
+
+        // --- SELECTED CARD LOGIC ---
+        if (isSelected) {
+          yOffset = 0;   // Don't go up too high, just stay at base level
+          angle = 0;     // Straighten up
+          // xOffset stays relative to keep its place in the "hole" we made
+        }
+
+        return Positioned(
+          left: centerX + xOffset - (cardWidth / 2),
+          bottom: 50 - yOffset,
+          child: Transform.rotate(
+            angle: angle,
+            child: GestureDetector(
+              onTap: () {
+                if(!isPlayerTurn) return;
+                setState(() => selectedCard = card);
+                HapticFeedback.selectionClick();
+              },
+              child: _buildRealCard(
+                  card,
+                  width: cardWidth,
+                  height: cardHeight,
+                  isSelected: isSelected,
+                  suitSize: 24,
+                  rankSize: 14
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _buildRealCard(String cardStr, {
+    double width = 50,
+    double height = 70,
+    bool isSelected = false,
+    double suitSize = 26,
+    double rankSize = 14
+  }) {
+    if (cardStr == "CORNER") return const SizedBox();
+    if (cardStr == "") return const SizedBox();
+
+    bool isRed = cardStr.contains('H') || cardStr.contains('D');
+    String suit = "";
+    if (cardStr.contains('H')) suit = "♥";
+    else if (cardStr.contains('D')) suit = "♦";
+    else if (cardStr.contains('C')) suit = "♣";
+    else if (cardStr.contains('S')) suit = "♠";
+
+    String rank = cardStr.substring(0, cardStr.length - 1);
+
+    return Container(
+      width: width,
+      height: height,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(6),
-        boxShadow: isFlat ? [] : [const BoxShadow(color: Colors.black54, blurRadius: 4, offset: Offset(2, 2))],
-        border: selectedCard == card && !isFlat ? Border.all(color: Colors.amber, width: 3) : Border.all(color: Colors.grey[300]!, width: 1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: isSelected ? Colors.amber : Colors.grey[400]!, width: isSelected ? 3 : 1),
+        boxShadow: isSelected
+            ? [const BoxShadow(color: Colors.amberAccent, blurRadius: 10, spreadRadius: 1)]
+            : [const BoxShadow(color: Colors.black54, blurRadius: 4, offset: Offset(2,2))],
       ),
       child: Stack(
         children: [
-          // Top Left
           Positioned(
-              left: 2, top: 2,
+            left: 2, top: 2,
+            child: Column(
+              children: [
+                Text(rank, style: TextStyle(color: isRed ? Colors.red[800] : Colors.black, fontWeight: FontWeight.bold, fontSize: rankSize - 2)),
+                Text(suit, style: TextStyle(color: isRed ? Colors.red[800] : Colors.black, fontSize: rankSize - 4)),
+              ],
+            ),
+          ),
+          Center(
+            child: Text(suit, style: TextStyle(color: isRed ? Colors.red[800] : Colors.black, fontSize: suitSize)),
+          ),
+          Positioned(
+            right: 2, bottom: 2,
+            child: Transform.rotate(
+              angle: pi,
               child: Column(
-                  children: [
-                    Text(rank, style: TextStyle(color: suitColor, fontWeight: FontWeight.bold, fontSize: 12 * scale, height: 1)),
-                    Icon(suitIcon, color: suitColor, size: 10 * scale)
-                  ]
-              )
-          ),
-          // Bottom Right (Rotated)
-          Positioned(
-              right: 2, bottom: 2,
-              child: Transform.rotate(
-                  angle: pi,
-                  child: Column(
-                      children: [
-                        Text(rank, style: TextStyle(color: suitColor, fontWeight: FontWeight.bold, fontSize: 12 * scale, height: 1)),
-                        Icon(suitIcon, color: suitColor, size: 10 * scale)
-                      ]
-                  )
-              )
-          ),
-          // Center Big Suit
-          Center(child: Icon(suitIcon, color: suitColor, size: 28 * scale)),
+                children: [
+                  Text(rank, style: TextStyle(color: isRed ? Colors.red[800] : Colors.black, fontWeight: FontWeight.bold, fontSize: rankSize - 2)),
+                  Text(suit, style: TextStyle(color: isRed ? Colors.red[800] : Colors.black, fontSize: rankSize - 4)),
+                ],
+              ),
+            ),
+          )
         ],
       ),
     );
   }
 
   Widget _buildBoardSquare(int index) {
-    bool isCorner = cornerIndices.contains(index);
+    String cardStr = boardLayout[index];
     int owner = boardState[index];
-    String cardName = boardLayout[index];
-    bool isWinningChip = false;
-    for(var seq in lockedSequences) if(seq.contains(index)) isWinningChip = true;
+    bool isCorner = cornerIndices.contains(index);
 
-    Color suitColor = _getSuitColor(cardName);
-    String rank = isCorner ? "" : cardName.substring(0, cardName.length - 1);
-    IconData suitIcon = isCorner ? Icons.star : _getSuitIcon(cardName);
+    // NO HIGHLIGHT LOGIC ANYMORE (Visual only)
 
-    Color bgColor = const Color(0xFFF5F5F5);
-    if (isCorner) bgColor = const Color(0xFFFFD700);
-
-    // Highlight logic
-    if(selectedCard != null && !isCorner && owner == 0) {
-      bool isJack = selectedCard!.startsWith("J");
-      bool isBlackJack = isJack && (selectedCard!.contains("C") || selectedCard!.contains("S"));
-      if (cardName == selectedCard || isBlackJack) bgColor = const Color(0xFF66BB6A);
+    Color chipColor = Colors.transparent;
+    // THIS IS THE FIX: USE CUSTOM CHIP DATA
+    if (owner != 0) {
+      if (owner == myPlayerValue) {
+        // Use the loaded chip's color
+        chipColor = myChip.color;
+      } else {
+        chipColor = Colors.red;
+      }
     }
-
-    bool isLastPlaced = (index == lastPlacedChipIndex);
 
     return GestureDetector(
       onTap: () => _onBoardTap(index),
       child: Container(
         decoration: BoxDecoration(
-          color: bgColor,
-          borderRadius: BorderRadius.circular(2),
-          border: isWinningChip ? Border.all(color: Colors.greenAccent, width: 2) : Border.all(color: Colors.grey[400]!, width: 0.5),
+          color: isCorner ? const Color(0xFF222222) : Colors.transparent,
         ),
         child: Stack(
+          alignment: Alignment.center,
           children: [
-            // CARD FACE (Corners like reference image)
-            if(!isCorner) ...[
-              Positioned(left: 1, top: 1, child: Text(rank, style: TextStyle(fontSize: 8, fontWeight: FontWeight.w900, color: suitColor))),
-              Positioned(left: 1, top: 10, child: Icon(suitIcon, size: 8, color: suitColor)),
+            if (!isCorner) _buildRealCard(
+                cardStr,
+                width: 200,
+                height: 300,
+                isSelected: false,
+                suitSize: 14,
+                rankSize: 10
+            ),
 
-              Positioned(right: 1, bottom: 1, child: Transform.rotate(angle: pi, child: Text(rank, style: TextStyle(fontSize: 8, fontWeight: FontWeight.w900, color: suitColor)))),
-              Positioned(right: 1, bottom: 10, child: Transform.rotate(angle: pi, child: Icon(suitIcon, size: 8, color: suitColor))),
+            if (isCorner) const Icon(Icons.stars, size: 24, color: Colors.amber),
 
-              // Center Suit (Large & Faded)
-              Center(child: Icon(suitIcon, size: 24, color: suitColor.withOpacity(0.15))),
-            ] else
-              const Center(child: Icon(Icons.star, size: 20, color: Colors.black)),
-
-            // CHIP OVERLAY (Centered)
             if (owner != 0)
-              Center(
-                child: AnimatedScale(
-                  scale: 1.0, duration: const Duration(milliseconds: 300), curve: Curves.elasticOut,
-                  child: Container(
-                    width: 30, height: 30,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      boxShadow: isWinningChip ? [BoxShadow(color: Colors.greenAccent, blurRadius: 10)] : (isLastPlaced ? [BoxShadow(color: Colors.cyanAccent, blurRadius: 8)] : [const BoxShadow(color: Colors.black54, blurRadius: 3, offset: Offset(1, 1))]),
-                      color: owner == 1 ? myChip.color : const Color(0xFFD32F2F),
-                      border: Border.all(color: Colors.white, width: 2),
-                    ),
-                    child: owner == 1 ? Icon(myChip.icon, color: Colors.white, size: 18) : null,
-                  ),
+              Container(
+                width: 24, height: 24,
+                decoration: BoxDecoration(
+                    color: chipColor,
+                    shape: BoxShape.circle,
+                    boxShadow: const [BoxShadow(color: Colors.black54, offset: Offset(1,1), blurRadius: 2)],
+                    border: index == lastPlacedChipIndex ? Border.all(color: Colors.white, width: 2) : null
                 ),
+                // If the chip has an icon, use it. Otherwise, simple checkmark for last move.
+                child: (owner == myPlayerValue && myChip.icon != Icons.circle)
+                    ? Icon(myChip.icon, size: 16, color: Colors.white)
+                    : (index == lastPlacedChipIndex ? const Center(child: Icon(Icons.check, size: 14, color: Colors.white)) : null),
               ),
+            for (var seq in winningSequences)
+              if (seq.contains(index))
+                Container(
+                  width: 20, height: 20,
+                  decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.greenAccent, width: 3)),
+                )
           ],
         ),
       ),
     );
   }
 
-  Widget _buildCardBack({double scale = 1.0}) {
-    return Container(
-        width: 45 * scale,
-        height: 65 * scale,
-        margin: const EdgeInsets.symmetric(horizontal: 2),
-        decoration: BoxDecoration(
-            color: const Color(0xFFB71C1C),
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(color: Colors.white, width: 1),
-            boxShadow: [const BoxShadow(color: Colors.black38, blurRadius: 2, offset: Offset(1, 1))]
-        ),
-        child: Center(
-            child: Container(
-                margin: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                    border: Border.all(color: Colors.white24, width: 1),
-                    borderRadius: BorderRadius.circular(2)
-                ),
-                child: const Center(child: Icon(Icons.hub, color: Colors.white24, size: 16))
-            )
-        )
-    );
-  }
-  Color _getSuitColor(String card) {
-    // Hearts and Diamonds are Red, Spades and Clubs are Black
-    if (card.contains("H") || card.contains("D")) {
-      return Colors.red[800]!;
-    }
-    return Colors.black;
-  }
-
-  IconData _getSuitIcon(String card) {
-    if (card.contains("H")) return CupertinoIcons.suit_heart_fill;
-    if (card.contains("D")) return CupertinoIcons.suit_diamond_fill;
-    if (card.contains("C")) return CupertinoIcons.suit_club_fill;
-    return CupertinoIcons.suit_spade_fill;
-  }
-}
-
-class FindingMatchView extends StatefulWidget {
-  final VoidCallback onCancel;
-  final VoidCallback onTimeout;
-  const FindingMatchView({required this.onCancel, required this.onTimeout, super.key});
-
-  @override
-  State<FindingMatchView> createState() => _FindingMatchViewState();
-}
-
-class _FindingMatchViewState extends State<FindingMatchView> with TickerProviderStateMixin {
-  late AnimationController _radarController;
-  late AnimationController _textPulseController;
-  Timer? _searchTimer;
-  int _seconds = 0;
-  final List<String> _statusMessages = ["Scanning network...", "Pinging servers...", "Looking for opponent...", "Establishing connection..."];
-  int _statusIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    // 1. Radar Animation
-    _radarController = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat();
-    // 2. Text Pulse
-    _textPulseController = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat(reverse: true);
-
-    // 3. Logic Timer (60s Limit)
-    _searchTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
-      setState(() {
-        _seconds++;
-        if (_seconds % 4 == 0) _statusIndex = (_statusIndex + 1) % _statusMessages.length; // Cycle text
-      });
-
-      if (_seconds >= 60) {
-        timer.cancel();
-        widget.onTimeout();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _radarController.dispose();
-    _textPulseController.dispose();
-    _searchTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget _buildSearchScreen() {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F172A), // Deep Cyber Blue
-      body: SafeArea(
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            // RADAR RINGS
-            ...List.generate(3, (index) {
-              return AnimatedBuilder(
-                animation: _radarController,
-                builder: (context, child) {
-                  double value = (_radarController.value + (index * 0.35)) % 1.0;
-                  double size = value * 400;
-                  double opacity = (1.0 - value).clamp(0.0, 1.0);
-
-                  return Container(
-                    width: size,
-                    height: size,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.cyanAccent.withOpacity(opacity), width: 2),
-                      boxShadow: [BoxShadow(color: Colors.cyanAccent.withOpacity(opacity * 0.5), blurRadius: 10)],
-                    ),
-                  );
-                },
-              );
-            }),
-
-            // CENTER ICON
-            const Icon(Icons.public, color: Colors.white, size: 50),
-
-            // TEXT STATUS
-            Positioned(
-              bottom: 150,
-              child: FadeTransition(
-                opacity: Tween(begin: 0.6, end: 1.0).animate(_textPulseController),
-                child: Column(
-                  children: [
-                    Text(_statusMessages[_statusIndex], style: const TextStyle(color: Colors.cyanAccent, fontSize: 16, letterSpacing: 1.2)),
-                    const SizedBox(height: 10),
-                    Text("Time Elapsed: $_seconds s", style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                  ],
-                ),
+      backgroundColor: const Color(0xFF1E1E1E),
+      body: Stack(
+        alignment: Alignment.center,
+        children: [
+          AnimatedBuilder(animation: _textPulseController, builder: (context, child) {
+            return Container(
+              width: 200, height: 200,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.cyanAccent.withOpacity(0.1 * _textPulseController.value)),
+            );
+          }),
+          const Icon(Icons.public, color: Colors.white, size: 50),
+          Positioned(
+            bottom: 150,
+            child: FadeTransition(
+              opacity: Tween(begin: 0.6, end: 1.0).animate(_textPulseController),
+              child: Column(
+                children: [
+                  Text(_statusMessages[_statusIndex], style: const TextStyle(color: Colors.cyanAccent, fontSize: 16, letterSpacing: 1.2)),
+                  const SizedBox(height: 10),
+                  Text("Time Elapsed: $_seconds s", style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                ],
               ),
             ),
-
-            // CANCEL BUTTON
-            Positioned(
-              bottom: 50,
-              child: TextButton(
-                onPressed: widget.onCancel,
-                style: TextButton.styleFrom(
-                  backgroundColor: Colors.red.withOpacity(0.2),
-                  padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30), side: const BorderSide(color: Colors.redAccent)),
-                ),
-                child: const Text("CANCEL SEARCH", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+          Positioned(
+            bottom: 50,
+            child: TextButton(
+              onPressed: _cancelSearch,
+              style: TextButton.styleFrom(
+                backgroundColor: Colors.red.withOpacity(0.2),
+                padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30), side: const BorderSide(color: Colors.redAccent)),
               ),
+              child: const Text("CANCEL", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

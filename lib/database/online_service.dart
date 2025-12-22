@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class OnlineService {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
+  final FirebaseAuth _auth = FirebaseAuth.instance;
 
   String? _myId;
   String? _gameId;
@@ -20,6 +21,10 @@ class OnlineService {
   Future<void> findMatch() async {
     final prefs = await SharedPreferences.getInstance();
     _myId = prefs.getString('unique_id') ?? "Player_${Random().nextInt(9999)}";
+    String myHandle = prefs.getString('unique_handle') ?? "Player";
+
+    // NEW: Get my Avatar ID
+    String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
 
     // Look for a waiting game
     final snapshot = await _db.child('games').orderByChild('status').equalTo('waiting').limitToFirst(1).get();
@@ -33,7 +38,8 @@ class OnlineService {
       await _db.child('games/$_gameId').update({
         'status': 'playing',
         'guest': _myId,
-        'guest_name': prefs.getString('unique_handle') ?? "Guest"
+        'guest_name': myHandle,
+        'guest_avatar': myAvatar, // <--- UPLOAD AVATAR
       });
     } else {
       // CREATE NEW GAME
@@ -43,7 +49,8 @@ class OnlineService {
       await _db.child('games/$_gameId').set({
         'status': 'waiting',
         'host': _myId,
-        'host_name': prefs.getString('unique_handle') ?? "Host",
+        'host_name': myHandle,
+        'host_avatar': myAvatar, // <--- UPLOAD AVATAR
         'turn': 'host', // Host goes first
         'board': List.filled(100, 0), // Empty board
         'last_move': null
@@ -54,10 +61,11 @@ class OnlineService {
   }
 
   Future<void> saveUserProfile(Map<String, dynamic> data) async {
-    final prefs = await SharedPreferences.getInstance();
-    String myId = prefs.getString('unique_id') ?? "unknown_user";
+    User? user = _auth.currentUser;
+    if (user == null) return;
 
-    await _db.child('users/$myId').update(data);
+    // Update the specific fields at the correct path: users/AUTH_UID
+    await _db.child('users/${user.uid}').update(data);
   }
 
   Future<bool> purchaseChip(String chipId, int cost) async {
@@ -102,7 +110,6 @@ class OnlineService {
 
   Future<void> recordGameEnd({required bool won, required String opponentName}) async {
     final prefs = await SharedPreferences.getInstance();
-    String? myId = prefs.getString('unique_id'); // This is the ID used in DB keys
     String? uid = FirebaseAuth.instance.currentUser?.uid; // Actual Auth UID
 
     if (uid == null) return; // Not logged in
@@ -150,40 +157,96 @@ class OnlineService {
     }
   }
 
-  Future<Map<String, dynamic>?> getUserProfile() async {
+  Future<bool> purchaseItem(String itemId, String type, int costOrReward) async {
     final prefs = await SharedPreferences.getInstance();
-    String myId = prefs.getString('unique_id') ?? "unknown_user";
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user == null) return false;
 
-    final snapshot = await _db.child('users/$myId').get();
+    DatabaseReference userRef = _db.child('users/${user.uid}');
+    final snapshot = await userRef.get();
+
+    if (snapshot.exists) {
+      Map<String, dynamic> data = Map<String, dynamic>.from(snapshot.value as Map);
+      int currentCoins = data['coins'] ?? 0;
+      int currentLives = data['lives'] ?? 0;
+
+      // LOGIC SWITCH BASED ON TYPE
+      if (type == 'coinPack') {
+        currentCoins += costOrReward;
+      }
+      else if (type == 'lifeRefill') {
+        if (itemId == 'lives_one') {
+          if (currentCoins >= 200) {
+            currentCoins -= 200;
+            currentLives += 1;
+          } else {
+            return false; // Not enough coins
+          }
+        } else if (itemId == 'lives_full') {
+          currentLives = 5;
+        }
+      }
+
+      // SAVE TO DB
+      await userRef.update({
+        'coins': currentCoins,
+        'lives': currentLives,
+      });
+
+      // SYNC LOCAL
+      await prefs.setInt('user_coins', currentCoins);
+
+      return true;
+    }
+    return false;
+  }
+
+  Future<Map<String, dynamic>?> getUserProfile() async {
+    User? user = _auth.currentUser;
+    if (user == null) return null;
+
+    final snapshot = await _db.child('users/${user.uid}').get();
 
     if (snapshot.exists) {
       return Map<String, dynamic>.from(snapshot.value as Map);
     }
-    return null; // No cloud data yet
+    return null;
   }
 
-  // 2. LISTEN FOR UPDATES
   void _listenToGame() {
     if (_gameId == null) return;
 
     _gameSubscription = _db.child('games/$_gameId').onValue.listen((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
       if (data != null && onGameStateChanged != null) {
-        // Convert to Map<String, dynamic> for easier use
         onGameStateChanged!(Map<String, dynamic>.from(data));
       }
     });
   }
 
-  // 3. SEND MOVE
+  Future<void> joinGameTransaction(String gameId, String myId, String myName, String myAvatar) async {
+    final gameRef = _db.child('games/$gameId');
+
+    await gameRef.runTransaction((Object? post) {
+      if (post == null) {
+        return Transaction.abort();
+      }
+      Map<String, dynamic> data = Map<String, dynamic>.from(post as Map);
+
+      // Only join if it is STILL waiting
+      if (data['status'] == 'waiting') {
+        data['status'] = 'playing';
+        data['guest'] = myId;
+        data['guest_name'] = myName;
+        data['guest_avatar'] = myAvatar;
+        return Transaction.success(data);
+      }
+      return Transaction.abort();
+    });
+  }
+
   Future<void> sendMove(int index, String card, int playerValue) async {
     if (_gameId == null) return;
-
-    // Update the board at specific index
-    // Note: In Firebase arrays are tricky, so we update specific keys if using a map,
-    // or just upload the whole board state for simplicity in MVP.
-    // For speed, let's just send the "last_move" and let the UI update the board locally,
-    // then sync the board array periodically.
 
     await _db.child('games/$_gameId').update({
       'board/$index': playerValue,
@@ -196,8 +259,7 @@ class OnlineService {
   void leaveGame() {
     _gameSubscription?.cancel();
     if (_gameId != null) {
-      // If waiting, delete. If playing, maybe mark as disconnected.
-      // Simple version: just stop listening.
+      // Just stop listening for MVP
     }
   }
 

@@ -4,6 +4,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:shared_preferences/shared_preferences.dart'; // Added for local sync
 import '../../database/online_service.dart';
 import 'data/chip_data.dart';
+import 'data/store_data.dart';
 
 class StoreScreen extends StatefulWidget {
   const StoreScreen({super.key});
@@ -150,6 +151,38 @@ class _StoreScreenState extends State<StoreScreen> with TickerProviderStateMixin
     );
   }
 
+  Future<void> _processPurchase(StoreItem item) async {
+    setState(() => isLoading = true);
+    bool success = false;
+
+    if (item.type == ItemType.coinPack) {
+      // SIMULATE REAL MONEY PAYMENT DELAY
+      await Future.delayed(const Duration(seconds: 1));
+      // In real app, check Stripe/GooglePay result here. We assume success:
+      success = await _onlineService.purchaseItem(item.id, 'coinPack', item.rewardAmount);
+    }
+    else if (item.type == ItemType.lifeRefill) {
+      if (item.realMoneyPrice > 0) {
+        // Real money life refill
+        await Future.delayed(const Duration(seconds: 1));
+        success = await _onlineService.purchaseItem(item.id, 'lifeRefill', 0);
+      } else {
+        // Coin purchase life refill
+        success = await _onlineService.purchaseItem(item.id, 'lifeRefill', item.coinPrice);
+      }
+    }
+
+    setState(() => isLoading = false);
+
+    if (mounted) {
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Purchased ${item.name}!"), backgroundColor: Colors.green));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Purchase Failed (Not enough coins?)"), backgroundColor: Colors.red));
+      }
+    }
+  }
+
   // --- TAB 1: CHIPS GRID ---
   Widget _buildChipsTab() {
     if (isLoading) return const Center(child: CircularProgressIndicator());
@@ -221,40 +254,45 @@ class _StoreScreenState extends State<StoreScreen> with TickerProviderStateMixin
     );
   }
 
-  // --- TAB 2: COINS (Visual Only) ---
   Widget _buildCoinsTab() {
-    return GridView.count(
-      crossAxisCount: 2, padding: const EdgeInsets.all(15), childAspectRatio: 0.85, crossAxisSpacing: 15, mainAxisSpacing: 15,
-      children: [
-        _buildStoreTile("Handful", "500 Coins", "\$0.99", Icons.circle, Colors.amber),
-        _buildStoreTile("Sack", "1200 Coins", "\$1.99", Icons.circle, Colors.amber),
-        _buildStoreTile("Chest", "5000 Coins", "\$4.99", Icons.circle, Colors.amber),
-        _buildStoreTile("Vault", "15000 Coins", "\$9.99", Icons.circle, Colors.amber),
-      ],
+    return GridView.builder(
+      padding: const EdgeInsets.all(16),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2, childAspectRatio: 0.85, crossAxisSpacing: 15, mainAxisSpacing: 15
+      ),
+      itemCount: coinItems.length,
+      itemBuilder: (context, index) {
+        final item = coinItems[index];
+        return _buildStoreTile(item);
+      },
     );
   }
 
-  // --- TAB 3: LIVES (Visual Only) ---
   Widget _buildLivesTab() {
-    return GridView.count(
-      crossAxisCount: 2, padding: const EdgeInsets.all(15), childAspectRatio: 0.85, crossAxisSpacing: 15, mainAxisSpacing: 15,
-      children: [
-        _buildStoreTile("Refill (+1)", "200 Coins", "", Icons.favorite, Colors.redAccent),
-        _buildStoreTile("Full Restore", "Full", "\$0.99", Icons.favorite, Colors.redAccent),
-        _buildStoreTile("Infinite", "1 Hr", "\$1.99", Icons.all_inclusive, Colors.blueAccent),
-      ],
+    return GridView.builder(
+      padding: const EdgeInsets.all(16),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2, childAspectRatio: 0.85, crossAxisSpacing: 15, mainAxisSpacing: 15
+      ),
+      itemCount: lifeItems.length,
+      itemBuilder: (context, index) {
+        final item = lifeItems[index];
+        return _buildStoreTile(item);
+      },
     );
   }
 
-  Widget _buildStoreTile(String name, String amount, String price, IconData icon, Color color) {
+  Widget _buildStoreTile(StoreItem item) {
+    String priceLabel = item.realMoneyPrice > 0 ? "\$${item.realMoneyPrice}" : "${item.coinPrice} Coins";
+
     return Container(
       decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.white10)),
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Expanded(child: Center(child: PulseWidget(child: Icon(icon, size: 60, color: color)))),
-          Text(amount, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
-          Text(name, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+          Expanded(child: Center(child: PulseWidget(child: Icon(item.icon, size: 60, color: item.color)))),
+          Text(item.description, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+          Text(item.name, style: const TextStyle(color: Colors.grey, fontSize: 12)),
           const SizedBox(height: 10),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
@@ -262,8 +300,8 @@ class _StoreScreenState extends State<StoreScreen> with TickerProviderStateMixin
               width: double.infinity,
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
-                onPressed: () {}, // Future Logic
-                child: Text(price.isEmpty ? "BUY" : price, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                onPressed: () => _processPurchase(item),
+                child: Text(priceLabel, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
               ),
             ),
           ),
