@@ -53,6 +53,21 @@ class _LoginScreenState extends State<LoginScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              Container(
+                height: 150,
+                width: 150,
+                decoration: BoxDecoration(
+                    image: const DecorationImage(
+                        image: AssetImage('assets/images/logo.png'),
+                        fit: BoxFit.contain
+                    ),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(color: Colors.blue.withOpacity(0.3), blurRadius: 30, spreadRadius: 5)
+                    ]
+                ),
+              ),
+              const SizedBox(height: 30),
               const Icon(Icons.hub, size: 80, color: Color(0xFFFFD700)),
               const SizedBox(height: 10),
               const Text("JACK'S LINES", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: 2)),
