@@ -107,6 +107,7 @@ class HomeTab extends StatefulWidget {
 class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   int userCoins = 1000;
   String selectedChipId = "default_blue";
+  GameChip selectedChip = allGameChips[0];
 
   // NEW VARIABLES
   String _avatarId = "avatar_1";
@@ -165,6 +166,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       setState(() {
         userCoins = prefs.getInt('user_coins') ?? 1000;
         selectedChipId = prefs.getString('selected_chip_id') ?? "default_blue";
+        selectedChip = allGameChips.firstWhere((c) => c.id == selectedChipId, orElse: () => allGameChips[0]);
         _avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
         _streak = prefs.getInt('streak') ?? 0;
         _lives = prefs.getInt('lives') ?? 5;

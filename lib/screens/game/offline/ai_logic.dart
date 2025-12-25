@@ -1,17 +1,16 @@
 import 'dart:math';
 import '../smart_deck/deck_manager.dart';
 
-// 1. Define the class that was missing
 class AiMove {
   final int index;
   final bool isRemoval;
+  final String cardUsed; // --- NEW: Track which card AI decided to use ---
 
-  AiMove({required this.index, this.isRemoval = false});
+  AiMove({required this.index, required this.cardUsed, this.isRemoval = false});
 }
 
 class AiLogic {
 
-  // 2. The main brain function
   static AiMove? findBestMove(
       List<String> aiHand,
       List<int> boardState,
@@ -19,81 +18,79 @@ class AiLogic {
       String difficulty,
       int aiPlayerId
       ) {
-    // 0. Parse Difficulty
     bool isHard = difficulty == "Hard";
     bool isMedium = difficulty == "Medium";
 
-    // 1. Identify Valid Moves
     List<AiMove> possibleMoves = [];
     Set<int> cornerIndices = {0, 9, 90, 99};
 
     for (String card in aiHand) {
-      bool isTwoEyed = DeckManager.isTwoEyedJack(card);
-      bool isOneEyed = DeckManager.isOneEyedJack(card);
+      // JACK LOGIC: Check Suits for Jack types
+      bool isJack = card.contains('J');
+      bool isRedJack = card.contains('H') || card.contains('D');
+      bool isBlackJack = card.contains('C') || card.contains('S');
 
-      // Scan board for matching spots
       for (int i = 0; i < 100; i++) {
         if (cornerIndices.contains(i)) continue;
-
         int owner = boardState[i];
 
-        // LOGIC: PLACING A CHIP
+        // PLACING LOGIC
         if (owner == 0) {
-          if (isTwoEyed || boardLayout[i] == card) {
-            possibleMoves.add(AiMove(index: i));
+          bool canPlace = false;
+          if (isJack && isBlackJack) {
+            canPlace = true; // Black Jack: Anywhere empty
+          } else if (!isJack && boardLayout[i] == card) {
+            canPlace = true; // Matching card
+          }
+
+          if (canPlace) {
+            possibleMoves.add(AiMove(index: i, cardUsed: card, isRemoval: false));
           }
         }
 
-        // LOGIC: REMOVING A CHIP (One-Eyed Jack)
-        else if (isOneEyed && owner != aiPlayerId && owner != 0) {
-          // AI considers removing player chip
-          // (Note: We skip 'locked' sequence check here for simplicity,
-          // usually safe to just try it)
-          possibleMoves.add(AiMove(index: i, isRemoval: true));
+        // REMOVAL LOGIC
+        else if (isJack && isRedJack && owner != 0 && owner != aiPlayerId) {
+          // AI checks if this chip is part of a sequence before trying to remove
+          // Note: GameBoard logic prevents sequence removal, but AI should be smart enough not to try.
+          possibleMoves.add(AiMove(index: i, cardUsed: card, isRemoval: true));
         }
       }
     }
 
     if (possibleMoves.isEmpty) return null;
 
-    // 2. Decision Making based on Difficulty
-    if (!isHard && !isMedium) {
-      // EASY: Random Move
-      return possibleMoves[Random().nextInt(possibleMoves.length)];
-    }
-
-    // HARD/MEDIUM: Score the moves
-    // We give points for:
-    // - Blocking opponent
-    // - Continuing own sequence
-
-    AiMove bestMove = possibleMoves[0];
-    int bestScore = -9999;
+    AiMove? bestMove;
+    double bestScore = -1000;
 
     for (var move in possibleMoves) {
-      int score = 0;
+      double score = 0;
 
       if (move.isRemoval) {
-        // Removing is generally good
-        score += 50;
-        // If blocking a potential sequence, add more points (Simple heuristic)
-        if (_hasNeighbor(move.index, boardState, (aiPlayerId == 1 ? 2 : 1))) {
-          score += 20;
-        }
+        score += 30; // Base removal value
+        // --- NEW: Prioritize blocking player's building lines ---
+        int oppNeighbors = _countNeighbors(move.index, boardState, (aiPlayerId == 1 ? 2 : 1));
+        score += (oppNeighbors * 20); // Remove chips that are helping player
       } else {
-        // Placing
-        // Check neighbors for same color (building sequence)
+        // Placing: Build your own line
         int neighbors = _countNeighbors(move.index, boardState, aiPlayerId);
-        score += (neighbors * 10);
+        score += (neighbors * 15);
 
-        // Two-Eyed Jacks are valuable, save them unless high impact
-        if (DeckManager.isTwoEyedJack(boardLayout[move.index])) { // Actually layout doesn't have jacks, check hand logic if needed
-          // Simplified: If using a wild card logic inside loop
+        // --- NEW: Actively Block Player ---
+        int oppNeighbors = _countNeighbors(move.index, boardState, (aiPlayerId == 1 ? 2 : 1));
+        if (oppNeighbors >= 3) {
+          score += 100; // Strong desire to block player's near-complete line
+        }
+
+        // Wild card conservation
+        if (move.cardUsed.contains('J')) {
+          score -= 10; // Try to save Jacks unless they are very useful
         }
       }
 
-      // Add a bit of randomness so AI isn't robotic
-      score += Random().nextInt(5);
+      // Randomness based on difficulty
+      if (!isHard) {
+        score += Random().nextInt(isMedium ? 10 : 30);
+      }
 
       if (score > bestScore) {
         bestScore = score;
@@ -104,23 +101,21 @@ class AiLogic {
     return bestMove;
   }
 
-  // --- HELPERS ---
-
   static int _countNeighbors(int index, List<int> board, int playerId) {
     int count = 0;
-    List<int> offsets = [-1, 1, -10, 10, -11, 11, -9, 9]; // All 8 directions
-
+    List<int> offsets = [-1, 1, -10, 10, -11, 11, -9, 9];
     for (int offset in offsets) {
       int neighbor = index + offset;
       if (neighbor >= 0 && neighbor < 100) {
-        // Simple bounds check (ignores wrapping for MVP simplicity)
+        // Check grid boundary for horizontal
+        if ((offset.abs() == 1 || offset.abs() == 11 || offset.abs() == 9)) {
+          int row = index ~/ 10;
+          int nRow = neighbor ~/ 10;
+          if ((row - nRow).abs() > 1) continue;
+        }
         if (board[neighbor] == playerId) count++;
       }
     }
     return count;
-  }
-
-  static bool _hasNeighbor(int index, List<int> board, int targetId) {
-    return _countNeighbors(index, board, targetId) > 0;
   }
 }
