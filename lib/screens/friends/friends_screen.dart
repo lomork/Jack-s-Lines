@@ -6,6 +6,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../../screens/store/data/chip_data.dart';
 import '../account/data/avatar_data.dart';
 import '../../notifications/notification_manager.dart';
+import '../../database/online_service.dart';
 
 class FriendsScreen extends StatefulWidget {
   const FriendsScreen({super.key});
@@ -14,32 +15,31 @@ class FriendsScreen extends StatefulWidget {
   State<FriendsScreen> createState() => _FriendsScreenState();
 }
 
-class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProviderStateMixin {
+class _FriendsScreenState extends State<FriendsScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
   final NotificationManager _notifManager = NotificationManager();
+  final OnlineService _onlineService = OnlineService();
 
   List<String> friendUids = [];
   Map<String, Map<String, dynamic>> friendProfiles = {};
 
-  // Requests state
   List<Map<String, dynamic>> _incomingRequests = [];
   List<Map<String, dynamic>> _outgoingRequests = [];
 
-  TextEditingController _searchController = TextEditingController();
+  final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _searchResults = [];
   List<Map<String, dynamic>> _recentOpponents = [];
   bool _isSearching = false;
+  bool _hasSearched = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this); // --- UPDATED: 3 Tabs ---
+    _tabController = TabController(length: 3, vsync: this);
     _notifManager.init();
-    _notifManager.onNotificationUpdate = () {
-      if (mounted) setState(() {});
-    };
     _listenToFriends();
     _fetchRecentOpponents();
     _listenToRequests();
@@ -56,7 +56,6 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     final user = _auth.currentUser;
     if (user == null) return;
 
-    // Listen for requests status in your own friends node
     _db.child('users/${user.uid}/friends').onValue.listen((event) {
       if (!mounted) return;
       List<Map<String, dynamic>> incoming = [];
@@ -66,8 +65,10 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
         final data = event.snapshot.value as Map;
         data.forEach((uid, details) {
           if (details is Map) {
-            if (details['status'] == 'pending') incoming.add({'uid': uid, ...details});
-            if (details['status'] == 'requested') outgoing.add({'uid': uid, ...details});
+            if (details['status'] == 'pending')
+              incoming.add({'uid': uid, ...details});
+            if (details['status'] == 'requested')
+              outgoing.add({'uid': uid, ...details});
           }
         });
       }
@@ -102,17 +103,16 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
           _fetchFriendProfiles();
         }
       } else {
-        if(mounted) setState(() => friendUids = []);
+        if (mounted) setState(() => friendUids = []);
       }
     });
   }
 
   Future<void> _fetchFriendProfiles() async {
     for (String uid in friendUids) {
-      final snapshot = await _db.child('users/$uid').get();
-      if (snapshot.exists) {
-        final data = Map<String, dynamic>.from(snapshot.value as Map);
-        if (mounted) setState(() => friendProfiles[uid] = data);
+      final profile = await _onlineService.getFriendPublicData(uid);
+      if (profile != null && mounted) {
+        setState(() => friendProfiles[uid] = profile);
       }
     }
   }
@@ -122,23 +122,31 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     if (user == null) return;
 
     try {
-      final snapshot = await _db.child('users/${user.uid}/matches').limitToLast(15).get();
+      final snapshot = await _db
+          .child('users/${user.uid}/match_history')
+          .limitToLast(15)
+          .get();
       if (snapshot.exists) {
         final data = snapshot.value as Map;
-        Map<String, Map<String, dynamic>> uniqueOpponents = {}; // --- deduplication ---
+        Map<String, Map<String, dynamic>> uniqueOpponents = {};
 
         data.forEach((key, value) {
           if (value['opponent_id'] != null) {
             uniqueOpponents[value['opponent_id']] = {
               'uid': value['opponent_id'],
-              'handle': value['opponent_name'] ?? "Unknown",
-              'avatar_id': value['opponent_avatar'] ?? "avatar_1",
+              'username': value['opponent_name'] ?? "Unknown",
+              'avatar': value['opponent_avatar'] ?? "avatar_1",
             };
           }
         });
 
         if (mounted) {
-          setState(() => _recentOpponents = uniqueOpponents.values.toList().reversed.toList());
+          setState(
+            () => _recentOpponents = uniqueOpponents.values
+                .toList()
+                .reversed
+                .toList(),
+          );
         }
       }
     } catch (e) {
@@ -148,36 +156,25 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
 
   Future<void> _performSearch(String query) async {
     if (query.trim().isEmpty) return;
-    if (query.length < 2) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Query too short")));
-      return;
-    }
-
-    setState(() { _isSearching = true; _searchResults = []; });
+    setState(() {
+      _isSearching = true;
+      _hasSearched = true;
+    });
 
     try {
-      final snapshot = await _db.child('users')
-          .orderByChild('handle')
-          .startAt(query)
-          .endAt("$query\uf8ff")
-          .limitToFirst(15)
-          .get();
-
-      List<Map<String, dynamic>> results = [];
-      if (snapshot.exists) {
-        final data = snapshot.value as Map;
-        data.forEach((key, value) {
-          if (key != _auth.currentUser?.uid) {
-            var userMap = Map<String, dynamic>.from(value);
-            userMap['uid'] = key;
-            results.add(userMap);
-          }
+      final results = await _onlineService.searchUsers(query.trim());
+      if (mounted) {
+        setState(() {
+          _searchResults = results
+              .where((u) => u['uid'] != _auth.currentUser?.uid)
+              .toList();
         });
       }
-
-      if (mounted) setState(() => _searchResults = results);
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Search failed."), backgroundColor: Colors.redAccent));
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("Search failed.")));
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
@@ -188,29 +185,33 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     if (user == null) return;
 
     try {
-      String myName = "Player"; // Fetch your real handle from a local var or pref
-      final mySnap = await _db.child('users/${user.uid}/handle').get();
-      if (mySnap.exists) myName = mySnap.value.toString();
+      String myName = "Player";
+      final myProfile = await _onlineService.getUserProfile();
+      if (myProfile != null) myName = myProfile['username'] ?? "Player";
 
       await _db.child('users/${user.uid}/friends/$targetUid').set({
         'added_at': ServerValue.timestamp,
-        'status': 'requested' // Outgoing
+        'status': 'requested',
       });
 
       await _db.child('users/$targetUid/friends/${user.uid}').set({
         'added_at': ServerValue.timestamp,
-        'status': 'pending' // Incoming for them
+        'status': 'pending',
       });
 
-      // Send actual Notification
       await _notifManager.sendFriendRequest(targetUid, myName);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Friend Request Sent!"), backgroundColor: Colors.blueAccent));
-        setState(() => _searchResults = []);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("Friend Request Sent!")));
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Add failed."), backgroundColor: Colors.redAccent));
+      debugPrint("Add friend error: $e");
+      if (mounted)
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text("Action failed.")));
     }
   }
 
@@ -218,10 +219,19 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     final user = _auth.currentUser;
     if (user == null) return;
 
-    await _db.child('users/${user.uid}/friends/$targetUid/status').set('active');
-    await _db.child('users/$targetUid/friends/${user.uid}/status').set('active');
+    await _db
+        .child('users/${user.uid}/friends/$targetUid/status')
+        .set('active');
+    await _db
+        .child('users/$targetUid/friends/${user.uid}/status')
+        .set('active');
 
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Friendship Accepted!"), backgroundColor: Colors.green));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("Friendship Accepted!"),
+        backgroundColor: Colors.green,
+      ),
+    );
   }
 
   Future<void> _removeFriend(String uid) async {
@@ -239,69 +249,55 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     }
   }
 
-  void _showFriendProfile(Map<String, dynamic> data, String uid, bool isFriend) {
-    String avatarId = data['selected_avatar_id'] ?? data['avatar_id'] ?? "avatar_1";
+  void _showFriendProfile(
+    Map<String, dynamic> data,
+    String uid,
+    bool isFriend,
+  ) {
+    String avatarId = data['avatar'] ?? "avatar_1";
     AvatarItem avatar = getAvatarById(avatarId);
-
-    String chipId = data['selected_chip_id'] ?? "default_blue";
-    GameChip chip = allGameChips.firstWhere((c) => c.id == chipId, orElse: () => allGameChips[0]);
-
-    // CALCULATE ACTUAL INFO
-    int wins = data['total_wins'] ?? 0;
-    int losses = data['total_losses'] ?? 0;
-    int streak = data['current_streak'] ?? 0;
-    int level = (data['xp'] ?? 0) ~/ 100 + 1;
+    String username = data['username'] ?? "Player";
 
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1E1E1E),
         shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(25),
-            side: const BorderSide(color: Colors.white10)
+          borderRadius: BorderRadius.circular(25),
+          side: const BorderSide(color: Colors.white10),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircleAvatar(radius: 45, backgroundColor: avatar.color, child: Icon(avatar.icon, size: 45, color: Colors.white)),
-            const SizedBox(height: 15),
-            Text(data['handle'] ?? "Player", style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-            Text("LEVEL $level", style: const TextStyle(color: Colors.blueAccent, fontSize: 10, fontWeight: FontWeight.w900)),
-            const SizedBox(height: 20),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _buildStatColumn("Wins", "$wins", Colors.greenAccent),
-                _buildStatColumn("Losses", "$losses", Colors.redAccent),
-                _buildStatColumn("Streak", "$streak", Colors.orangeAccent),
-              ],
+            CircleAvatar(
+              radius: 45,
+              backgroundColor: avatar.color,
+              child: Icon(avatar.icon, size: 45, color: Colors.white),
             ),
-            const SizedBox(height: 25),
-
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(15)),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text("Equipped: ", style: TextStyle(color: Colors.grey, fontSize: 12)),
-                  Icon(chip.icon, color: chip.color, size: 18),
-                  const SizedBox(width: 8),
-                  Text(chip.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
-                ],
+            const SizedBox(height: 15),
+            Text(
+              username,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
               ),
             ),
-
             const SizedBox(height: 25),
-
             if (isFriend)
               SizedBox(
                 width: double.infinity,
                 child: CupertinoButton(
                   color: Colors.redAccent.withOpacity(0.1),
                   onPressed: () => _removeFriend(uid),
-                  child: const Text("UNFRIEND", style: TextStyle(color: Colors.redAccent, fontSize: 14, fontWeight: FontWeight.bold)),
+                  child: const Text(
+                    "UNFRIEND",
+                    style: TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               )
             else
@@ -313,21 +309,19 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
                     _addFriend(uid);
                     Navigator.pop(context);
                   },
-                  child: const Text("ADD FRIEND", style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+                  child: const Text(
+                    "ADD FRIEND",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               ),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildStatColumn(String label, String value, Color color) {
-    return Column(
-      children: [
-        Text(value, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 18)),
-        Text(label.toUpperCase(), style: const TextStyle(color: Colors.grey, fontSize: 9, letterSpacing: 1.0)),
-      ],
     );
   }
 
@@ -339,19 +333,44 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
-        title: const Text("FRIENDS", style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 3)),
+        title: const Text(
+          "FRIENDS",
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.w900,
+            color: Colors.white,
+            letterSpacing: 3,
+          ),
+        ),
         bottom: TabBar(
           controller: _tabController,
           indicatorColor: Colors.blueAccent,
-          indicatorWeight: 3,
-          labelColor: Colors.blueAccent,
-          unselectedLabelColor: Colors.white24,
           tabs: [
             const Tab(text: "MY LIST"),
-            Tab(child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              const Text("REQUESTS"),
-              if (_incomingRequests.isNotEmpty) Container(margin: const EdgeInsets.only(left: 5), padding: const EdgeInsets.all(4), decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle), child: Text("${_incomingRequests.length}", style: const TextStyle(fontSize: 8, color: Colors.white)))
-            ])),
+            Tab(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text("REQUESTS"),
+                  if (_incomingRequests.isNotEmpty)
+                    Container(
+                      margin: const EdgeInsets.only(left: 5),
+                      padding: const EdgeInsets.all(4),
+                      decoration: const BoxDecoration(
+                        color: Colors.redAccent,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(
+                        "${_incomingRequests.length}",
+                        style: const TextStyle(
+                          fontSize: 8,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             const Tab(text: "DISCOVER"),
           ],
         ),
@@ -368,9 +387,10 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
   }
 
   Widget _buildMyFriendsTab() {
-    if (friendUids.isEmpty) {
-      return const Center(child: Text("Your friends list is empty.", style: TextStyle(color: Colors.white24)));
-    }
+    if (friendUids.isEmpty)
+      return const Center(
+        child: Text("Empty list.", style: TextStyle(color: Colors.white24)),
+      );
     return ListView.builder(
       padding: const EdgeInsets.all(16),
       itemCount: friendUids.length,
@@ -378,19 +398,20 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
         String uid = friendUids[index];
         Map<String, dynamic>? profile = friendProfiles[uid];
         if (profile == null) return const SizedBox();
-
-        String avatarId = profile['selected_avatar_id'] ?? profile['avatar_id'] ?? "avatar_1";
-        AvatarItem avatar = getAvatarById(avatarId);
+        AvatarItem avatar = getAvatarById(profile['avatar'] ?? "avatar_1");
 
         return Card(
           color: Colors.white.withOpacity(0.04),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
           margin: const EdgeInsets.only(bottom: 12),
           child: ListTile(
-            leading: CircleAvatar(backgroundColor: avatar.color, child: Icon(avatar.icon, color: Colors.white, size: 20)),
-            title: Text(profile['handle'] ?? "Player", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-            subtitle: Text("Level ${(profile['xp'] ?? 0) ~/ 100 + 1}", style: const TextStyle(color: Colors.white38, fontSize: 11)),
-            trailing: const Icon(Icons.chevron_right, color: Colors.white12),
+            leading: CircleAvatar(
+              backgroundColor: avatar.color,
+              child: Icon(avatar.icon, color: Colors.white, size: 20),
+            ),
+            title: Text(
+              profile['username'] ?? "Player",
+              style: const TextStyle(color: Colors.white),
+            ),
             onTap: () => _showFriendProfile(profile, uid, true),
           ),
         );
@@ -399,21 +420,34 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
   }
 
   Widget _buildRequestsTab() {
-    if (_incomingRequests.isEmpty && _outgoingRequests.isEmpty) {
-      return const Center(child: Text("No pending requests.", style: TextStyle(color: Colors.white24)));
-    }
+    if (_incomingRequests.isEmpty && _outgoingRequests.isEmpty)
+      return const Center(
+        child: Text("No requests.", style: TextStyle(color: Colors.white24)),
+      );
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         if (_incomingRequests.isNotEmpty) ...[
-          const Text("INCOMING", style: TextStyle(color: Colors.blueAccent, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-          const SizedBox(height: 10),
+          const Text(
+            "INCOMING",
+            style: TextStyle(
+              color: Colors.blueAccent,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
           ..._incomingRequests.map((req) => _buildRequestTile(req, true)),
-          const SizedBox(height: 20),
         ],
         if (_outgoingRequests.isNotEmpty) ...[
-          const Text("OUTGOING", style: TextStyle(color: Colors.orangeAccent, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-          const SizedBox(height: 10),
+          const SizedBox(height: 20),
+          const Text(
+            "OUTGOING",
+            style: TextStyle(
+              color: Colors.orangeAccent,
+              fontSize: 10,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
           ..._outgoingRequests.map((req) => _buildRequestTile(req, false)),
         ],
       ],
@@ -422,27 +456,44 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
 
   Widget _buildRequestTile(Map<String, dynamic> req, bool isIncoming) {
     return FutureBuilder(
-        future: _db.child('users/${req['uid']}').get(),
-        builder: (context, snapshot) {
-          if (!snapshot.hasData) return const SizedBox();
-          final profile = Map<String, dynamic>.from(snapshot.data!.value as Map);
-          final avatar = getAvatarById(profile['selected_avatar_id'] ?? profile['avatar_id']);
+      future: _onlineService.getFriendPublicData(req['uid']),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox();
+        final profile = snapshot.data!;
+        final avatar = getAvatarById(profile['avatar'] ?? "avatar_1");
 
-          return ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: CircleAvatar(backgroundColor: avatar.color, child: Icon(avatar.icon, color: Colors.white, size: 16)),
-            title: Text(profile['handle'] ?? "Player", style: const TextStyle(color: Colors.white, fontSize: 14)),
-            trailing: isIncoming
-                ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(icon: const Icon(Icons.check_circle, color: Colors.greenAccent), onPressed: () => _acceptFriend(req['uid'])),
-                IconButton(icon: const Icon(Icons.cancel, color: Colors.redAccent), onPressed: () => _removeFriend(req['uid'])),
-              ],
-            )
-                : const Text("PENDING", style: TextStyle(color: Colors.white24, fontSize: 10, fontWeight: FontWeight.bold)),
-          );
-        }
+        return ListTile(
+          leading: CircleAvatar(
+            backgroundColor: avatar.color,
+            child: Icon(avatar.icon, color: Colors.white, size: 16),
+          ),
+          title: Text(
+            profile['username'] ?? "Player",
+            style: const TextStyle(color: Colors.white, fontSize: 14),
+          ),
+          trailing: isIncoming
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(
+                        Icons.check_circle,
+                        color: Colors.greenAccent,
+                      ),
+                      onPressed: () => _acceptFriend(req['uid']),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.cancel, color: Colors.redAccent),
+                      onPressed: () => _removeFriend(req['uid']),
+                    ),
+                  ],
+                )
+              : const Text(
+                  "PENDING",
+                  style: TextStyle(color: Colors.white24, fontSize: 10),
+                ),
+        );
+      },
     );
   }
 
@@ -450,46 +501,73 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           TextField(
             controller: _searchController,
             style: const TextStyle(color: Colors.white),
-            cursorColor: Colors.blueAccent,
             decoration: InputDecoration(
-              hintText: "Search handle...",
-              hintStyle: const TextStyle(color: Colors.white24, fontSize: 14),
-              prefixIcon: const Icon(Icons.search, color: Colors.white24),
-              fillColor: Colors.white.withOpacity(0.05),
+              hintText: "Search username...",
               filled: true,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
+              fillColor: Colors.white.withOpacity(0.05),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(15),
+                borderSide: BorderSide.none,
+              ),
               suffixIcon: IconButton(
-                  icon: const Icon(Icons.send_rounded, color: Colors.blueAccent),
-                  onPressed: () => _performSearch(_searchController.text)
+                icon: const Icon(Icons.search),
+                onPressed: () => _performSearch(_searchController.text),
               ),
             ),
             onSubmitted: _performSearch,
           ),
-          const SizedBox(height: 30),
-
-          if (_isSearching) const Center(child: CircularProgressIndicator(color: Colors.blueAccent)),
-
-          Expanded(
-            child: ListView(
-              children: [
-                if (!_isSearching && _searchResults.isNotEmpty) ...[
-                  const Text("SEARCH RESULTS", style: TextStyle(color: Colors.blueAccent, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-                  const SizedBox(height: 10),
-                  ..._searchResults.map((user) => _buildUserListTile(user)),
-                ],
-
-                if (!_isSearching && _searchResults.isEmpty && _recentOpponents.isNotEmpty) ...[
-                  const Text("RECENT OPPONENTS", style: TextStyle(color: Colors.orangeAccent, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
-                  const SizedBox(height: 10),
-                  ..._recentOpponents.map((user) => _buildUserListTile(user)),
-                ],
-              ],
+          if (_isSearching)
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: CircularProgressIndicator(color: Colors.blueAccent),
             ),
+          Expanded(
+            child: _hasSearched && _searchResults.isEmpty && !_isSearching
+                ? const Center(
+                    child: Text(
+                      "No users found.",
+                      style: TextStyle(color: Colors.white24),
+                    ),
+                  )
+                : ListView(
+                    children: [
+                      if (_searchResults.isNotEmpty) ...[
+                        const SizedBox(height: 20),
+                        const Text(
+                          "RESULTS",
+                          style: TextStyle(
+                            color: Colors.blueAccent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        ..._searchResults.map(
+                          (user) => _buildUserListTile(user),
+                        ),
+                      ],
+                      // Show recent opponents if no search has been performed yet
+                      if (!_hasSearched && _recentOpponents.isNotEmpty) ...[
+                        const SizedBox(height: 20),
+                        const Text(
+                          "RECENT OPPONENTS",
+                          style: TextStyle(
+                            color: Colors.orangeAccent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        ..._recentOpponents.map(
+                          (user) => _buildUserListTile(user),
+                        ),
+                      ],
+                    ],
+                  ),
           ),
         ],
       ),
@@ -498,22 +576,32 @@ class _FriendsScreenState extends State<FriendsScreen> with SingleTickerProvider
 
   Widget _buildUserListTile(Map<String, dynamic> user) {
     bool isAlreadyFriend = friendUids.contains(user['uid']);
-    bool isPending = _incomingRequests.any((r) => r['uid'] == user['uid']) || _outgoingRequests.any((r) => r['uid'] == user['uid']);
-    AvatarItem avatar = getAvatarById(user['selected_avatar_id'] ?? user['avatar_id']);
+    bool isPending =
+        _incomingRequests.any((r) => r['uid'] == user['uid']) ||
+        _outgoingRequests.any((r) => r['uid'] == user['uid']);
+    AvatarItem avatar = getAvatarById(user['avatar'] ?? "avatar_1");
 
     return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: CircleAvatar(backgroundColor: avatar.color, child: Icon(avatar.icon, color: Colors.white, size: 18)),
-      title: Text(user['handle'] ?? "Player", style: const TextStyle(color: Colors.white, fontSize: 14)),
+      leading: CircleAvatar(
+        backgroundColor: avatar.color,
+        child: Icon(avatar.icon, color: Colors.white, size: 18),
+      ),
+      title: Text(
+        user['username'] ?? "Player",
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+      ),
       trailing: isAlreadyFriend
-          ? const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20)
+          ? const Icon(Icons.check_circle, color: Colors.greenAccent)
           : isPending
-          ? const Text("REQUESTED", style: TextStyle(color: Colors.white24, fontSize: 9, fontWeight: FontWeight.bold))
-          : IconButton(icon: const Icon(Icons.person_add, color: Colors.blueAccent), onPressed: () => _addFriend(user['uid'])),
-      onTap: () async {
-        final snap = await _db.child('users/${user['uid']}').get();
-        if (snap.exists && mounted) _showFriendProfile(Map<String, dynamic>.from(snap.value as Map), user['uid'], isAlreadyFriend);
-      },
+          ? const Text(
+              "REQUESTED",
+              style: TextStyle(color: Colors.white24, fontSize: 9),
+            )
+          : IconButton(
+              icon: const Icon(Icons.person_add, color: Colors.blueAccent),
+              onPressed: () => _addFriend(user['uid']),
+            ),
+      onTap: () => _showFriendProfile(user, user['uid'], isAlreadyFriend),
     );
   }
 }
