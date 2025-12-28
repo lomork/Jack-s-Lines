@@ -34,6 +34,7 @@ class _FriendsScreenState extends State<FriendsScreen>
   List<Map<String, dynamic>> _recentOpponents = [];
   bool _isSearching = false;
   bool _hasSearched = false;
+  Timer? _debounce;
 
   @override
   void initState() {
@@ -49,6 +50,7 @@ class _FriendsScreenState extends State<FriendsScreen>
   void dispose() {
     _tabController.dispose();
     _searchController.dispose();
+    _debounce?.cancel();
     super.dispose();
   }
 
@@ -154,23 +156,57 @@ class _FriendsScreenState extends State<FriendsScreen>
     }
   }
 
+  void _onSearchChanged(String query) {
+    if (_debounce?.isActive ?? false) _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () {
+      if (query.isNotEmpty) {
+        _performSearch(query);
+      } else {
+        setState(() {
+          _searchResults = [];
+          _hasSearched = false;
+        });
+      }
+    });
+  }
+
   Future<void> _performSearch(String query) async {
-    if (query.trim().isEmpty) return;
     setState(() {
       _isSearching = true;
       _hasSearched = true;
     });
 
     try {
-      final results = await _onlineService.searchUsers(query.trim());
+      // Reverted to simple prefix search to fix the "No users found" issue
+      // Ensure 'username_lowercase' exists in your public_profiles nodes
+      final lowercaseQuery = query.trim().toLowerCase();
+      final snapshot = await _db
+          .child('public_profiles')
+          .orderByChild('username_lowercase')
+          .startAt(lowercaseQuery)
+          .endAt(lowercaseQuery + "\uf8ff")
+          .limitToFirst(20)
+          .get();
+
+      List<Map<String, dynamic>> results = [];
+      if (snapshot.exists) {
+        final data = snapshot.value as Map;
+        data.forEach((key, value) {
+          if (key != _auth.currentUser?.uid) {
+            var userMap = Map<String, dynamic>.from(value);
+            userMap['uid'] = key;
+            results.add(userMap);
+          }
+        });
+      }
+
       if (mounted) {
         setState(() {
-          _searchResults = results
-              .where((u) => u['uid'] != _auth.currentUser?.uid)
-              .toList();
+          _searchResults = results;
         });
       }
     } catch (e) {
+      debugPrint("Search error: $e");
       if (mounted)
         ScaffoldMessenger.of(
           context,
@@ -178,6 +214,13 @@ class _FriendsScreenState extends State<FriendsScreen>
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
+  }
+
+  int _getMutualFriendsCount(Map<String, dynamic> targetProfile) {
+    List<dynamic> targetFriends = targetProfile['friend_uids'] ?? [];
+    return friendUids
+        .where((myFriend) => targetFriends.contains(myFriend))
+        .length;
   }
 
   Future<void> _addFriend(String targetUid) async {
@@ -257,6 +300,7 @@ class _FriendsScreenState extends State<FriendsScreen>
     String avatarId = data['avatar'] ?? "avatar_1";
     AvatarItem avatar = getAvatarById(avatarId);
     String username = data['username'] ?? "Player";
+    int mutuals = _getMutualFriendsCount(data);
 
     showDialog(
       context: context,
@@ -283,6 +327,17 @@ class _FriendsScreenState extends State<FriendsScreen>
                 fontWeight: FontWeight.bold,
               ),
             ),
+            if (mutuals > 0)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  "$mutuals Mutual Friend${mutuals > 1 ? 's' : ''}",
+                  style: TextStyle(
+                    color: Colors.blueAccent.withOpacity(0.7),
+                    fontSize: 12,
+                  ),
+                ),
+              ),
             const SizedBox(height: 25),
             if (isFriend)
               SizedBox(
@@ -399,18 +454,50 @@ class _FriendsScreenState extends State<FriendsScreen>
         Map<String, dynamic>? profile = friendProfiles[uid];
         if (profile == null) return const SizedBox();
         AvatarItem avatar = getAvatarById(profile['avatar'] ?? "avatar_1");
+        bool isOnline = profile['status'] == 'online';
 
         return Card(
           color: Colors.white.withOpacity(0.04),
           margin: const EdgeInsets.only(bottom: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
           child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: avatar.color,
-              child: Icon(avatar.icon, color: Colors.white, size: 20),
+            leading: Stack(
+              children: [
+                CircleAvatar(
+                  backgroundColor: avatar.color,
+                  child: Icon(avatar.icon, color: Colors.white, size: 20),
+                ),
+                if (isOnline)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: Colors.greenAccent,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: const Color(0xFF121212),
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
             title: Text(
               profile['username'] ?? "Player",
               style: const TextStyle(color: Colors.white),
+            ),
+            subtitle: Text(
+              isOnline ? "Playing now" : "Offline",
+              style: TextStyle(
+                color: isOnline ? Colors.blueAccent : Colors.white24,
+                fontSize: 11,
+              ),
             ),
             onTap: () => _showFriendProfile(profile, uid, true),
           ),
@@ -505,6 +592,7 @@ class _FriendsScreenState extends State<FriendsScreen>
           TextField(
             controller: _searchController,
             style: const TextStyle(color: Colors.white),
+            onChanged: _onSearchChanged,
             decoration: InputDecoration(
               hintText: "Search username...",
               filled: true,
@@ -513,12 +601,17 @@ class _FriendsScreenState extends State<FriendsScreen>
                 borderRadius: BorderRadius.circular(15),
                 borderSide: BorderSide.none,
               ),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.search),
-                onPressed: () => _performSearch(_searchController.text),
-              ),
+              prefixIcon: const Icon(Icons.search, color: Colors.white24),
+              suffixIcon: _searchController.text.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear, color: Colors.white24),
+                      onPressed: () {
+                        _searchController.clear();
+                        _onSearchChanged("");
+                      },
+                    )
+                  : null,
             ),
-            onSubmitted: _performSearch,
           ),
           if (_isSearching)
             const Padding(
@@ -550,7 +643,6 @@ class _FriendsScreenState extends State<FriendsScreen>
                           (user) => _buildUserListTile(user),
                         ),
                       ],
-                      // Show recent opponents if no search has been performed yet
                       if (!_hasSearched && _recentOpponents.isNotEmpty) ...[
                         const SizedBox(height: 20),
                         const Text(
@@ -580,15 +672,44 @@ class _FriendsScreenState extends State<FriendsScreen>
         _incomingRequests.any((r) => r['uid'] == user['uid']) ||
         _outgoingRequests.any((r) => r['uid'] == user['uid']);
     AvatarItem avatar = getAvatarById(user['avatar'] ?? "avatar_1");
+    int mutuals = _getMutualFriendsCount(user);
+    bool isOnline = user['status'] == 'online';
 
     return ListTile(
-      leading: CircleAvatar(
-        backgroundColor: avatar.color,
-        child: Icon(avatar.icon, color: Colors.white, size: 18),
+      leading: Stack(
+        children: [
+          CircleAvatar(
+            backgroundColor: avatar.color,
+            child: Icon(avatar.icon, color: Colors.white, size: 18),
+          ),
+          if (isOnline)
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: Colors.greenAccent,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF121212), width: 1),
+                ),
+              ),
+            ),
+        ],
       ),
       title: Text(
         user['username'] ?? "Player",
         style: const TextStyle(color: Colors.white, fontSize: 14),
+      ),
+      subtitle: Text(
+        mutuals > 0
+            ? "$mutuals mutual friend${mutuals > 1 ? 's' : ''}"
+            : (isOnline ? "Online" : "Offline"),
+        style: TextStyle(
+          color: isOnline ? Colors.blueAccent.withOpacity(0.5) : Colors.white24,
+          fontSize: 10,
+        ),
       ),
       trailing: isAlreadyFriend
           ? const Icon(Icons.check_circle, color: Colors.greenAccent)
