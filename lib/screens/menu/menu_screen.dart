@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:confetti/confetti.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 
+import '../game/play_online.dart';
 import '../store/data/chip_data.dart';
 import '../game/game_board.dart';
 import '../options/options_screen.dart';
@@ -13,7 +15,7 @@ import '../account/account_screen.dart';
 import '../store/store_screen.dart';
 import '../friends/friends_screen.dart';
 import '../account/data/avatar_data.dart';
-import '../account/avatar_selector.dart'; 
+import '../account/avatar_selector.dart';
 
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key});
@@ -27,12 +29,18 @@ class _MenuScreenState extends State<MenuScreen> {
 
   Widget _getCurrentScreen() {
     switch (_selectedIndex) {
-      case 0: return const AccountScreen();
-      case 1: return const FriendsScreen();
-      case 2: return const HomeTab();
-      case 3: return const StoreScreen();
-      case 4: return const OptionsScreen();
-      default: return const HomeTab();
+      case 0:
+        return const AccountScreen();
+      case 1:
+        return const FriendsScreen();
+      case 2:
+        return const HomeTab();
+      case 3:
+        return const StoreScreen();
+      case 4:
+        return const OptionsScreen();
+      default:
+        return const HomeTab();
     }
   }
 
@@ -89,7 +97,10 @@ class _MenuScreenState extends State<MenuScreen> {
     return Container(
       decoration: BoxDecoration(
         boxShadow: [
-          BoxShadow(color: const Color(0xFFFFD700).withOpacity(0.6), blurRadius: 15.0),
+          BoxShadow(
+            color: const Color(0xFFFFD700).withOpacity(0.6),
+            blurRadius: 15.0,
+          ),
         ],
       ),
       child: Icon(icon, size: 30),
@@ -120,7 +131,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _rotateController = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat();
+    _rotateController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 8),
+    )..repeat();
     _loadUserData();
     _listenForUpdates();
   }
@@ -133,7 +147,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   void _listenForUpdates() {
     Timer.periodic(const Duration(seconds: 1), (timer) {
-      if(!mounted) {
+      if (!mounted) {
         timer.cancel();
         return;
       }
@@ -166,7 +180,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       setState(() {
         userCoins = prefs.getInt('user_coins') ?? 1000;
         selectedChipId = prefs.getString('selected_chip_id') ?? "default_blue";
-        selectedChip = allGameChips.firstWhere((c) => c.id == selectedChipId, orElse: () => allGameChips[0]);
+        selectedChip = allGameChips.firstWhere(
+          (c) => c.id == selectedChipId,
+          orElse: () => allGameChips[0],
+        );
         _avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
         _streak = prefs.getInt('streak') ?? 0;
         _lives = prefs.getInt('lives') ?? 5;
@@ -181,13 +198,20 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       builder: (context) {
         return AlertDialog(
           backgroundColor: const Color(0xFF2C2C2C),
-          title: const Text("Select Difficulty", style: TextStyle(color: Color(0xFFFFD700))),
+          title: const Text(
+            "Select Difficulty",
+            style: TextStyle(color: Color(0xFFFFD700)),
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildDiffButton("Easy", Colors.green, "Random moves"),
               const SizedBox(height: 10),
-              _buildDiffButton("Medium", Colors.orange, "Thinking occasionally"),
+              _buildDiffButton(
+                "Medium",
+                Colors.orange,
+                "Thinking occasionally",
+              ),
               const SizedBox(height: 10),
               _buildDiffButton("Hard", Colors.red, "Strategic Master"),
             ],
@@ -208,12 +232,27 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         ),
         onPressed: () {
           Navigator.pop(context); // Close dialog
-          Navigator.push(context, MaterialPageRoute(builder: (context) => GameBoard(difficulty: label)));
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => GameBoard(difficulty: label),
+            ),
+          );
         },
         child: Column(
           children: [
-            Text(label, style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 18)),
-            Text(sub, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+              ),
+            ),
+            Text(
+              sub,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -222,126 +261,216 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    GameChip currentChip = allGameChips.firstWhere((c) => c.id == selectedChipId, orElse: () => allGameChips[0]);
-    AvatarItem currentAvatar = allAvatars.firstWhere((a) => a.id == _avatarId, orElse: () => allAvatars[0]);
+    GameChip currentChip = allGameChips.firstWhere(
+          (c) => c.id == selectedChipId,
+      orElse: () => allGameChips[0],
+    );
+    AvatarItem currentAvatar = allAvatars.firstWhere(
+          (a) => a.id == _avatarId,
+      orElse: () => allAvatars[0],
+    );
 
-    return SingleChildScrollView(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            // --- NEW LAYOUT: COINS/LIVES | AVATAR | STREAK ---
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                // LEFT COLUMN: COINS & LIVES
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return Stack(
+      children: [
+        // 1. Dynamic Background Glow
+        AnimatedContainer(
+          duration: const Duration(seconds: 2),
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              colors: [
+                selectedChip.color.withOpacity(0.15),
+                Colors.transparent,
+              ],
+              center: Alignment.center,
+              radius: 1.5,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
+          child: Column(
+            children: [
+              SizedBox(
+                height: 110,
+                child: Row(
                   children: [
-                    TopStatBox(
-                        color: const Color(0xFFFFD700),
-                        text: "$userCoins",
-                        iconWidget: PulseWidget(child: const Icon(Icons.circle, color: Color(0xFFFFD700), size: 20))
+                    Expanded(
+                      child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          TopStatBox(
+                            color: const Color(0xFFFFD700),
+                            text: "$userCoins",
+                            iconWidget: PulseWidget(
+                              child: const Icon(Icons.circle, color: Color(0xFFFFD700), size: 12),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          TopStatBox(
+                            color: Colors.pinkAccent,
+                            text: "$_lives",
+                            iconWidget: const Icon(Icons.favorite, color: Colors.pinkAccent, size: 12),
+                          ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 8),
-                    TopStatBox(
-                        color: Colors.pinkAccent,
-                        text: "$_lives",
-                        iconWidget: const Icon(Icons.favorite, color: Colors.pinkAccent, size: 20)
                     ),
-                  ],
-                ),
 
-                // CENTER COLUMN: AVATAR & USERNAME
-                GestureDetector(
-                  onTap: () {
-                    Navigator.push(context, MaterialPageRoute(builder: (context) => const AvatarSelectorScreen()));
-                  },
-                  child: Column(
-                    children: [
-                      StreakFireEffect(
-                        isEnabled: _streak >= 3,
-                        child: CircleAvatar(
-                          radius: 35, // Smaller size (was 50)
-                          backgroundColor: Colors.white10,
-                          child: CircleAvatar(
-                            radius: 32,
-                            backgroundColor: currentAvatar.color,
-                            child: Icon(currentAvatar.icon, size: 30, color: Colors.white),
+                    Expanded(
+                    child: Align(
+                      alignment: Alignment.center,
+                      child: GestureDetector(
+                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AvatarSelectorScreen())),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircleAvatar(
+                                radius: 30,
+                                backgroundColor: Colors.white10,
+                                child: CircleAvatar(
+                                  radius: 27,
+                                  backgroundColor: currentAvatar.color,
+                                  child: Icon(currentAvatar.icon, size: 24, color: Colors.white),
+                                ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _username,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    ),
+
+                    // 3. RIGHT SIDE: Streak
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: StreakFireEffect( // Glow effect MOVED to the streak box
+                          isEnabled: _streak >= 3,
+                          child: TopStatBox(
+                            color: Colors.redAccent,
+                            text: "Streak: $_streak",
+                            iconWidget: const BeatWidget(
+                              child: Icon(Icons.whatshot, color: Colors.redAccent, size: 12),
+                            ),
                           ),
                         ),
                       ),
-                      const SizedBox(height: 5),
-                      Text(
-                        _username,
-                        style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12),
-                      ),
-                      const Text(
-                        "EDIT",
-                        style: TextStyle(color: Colors.grey, fontSize: 9),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // RIGHT COLUMN: STREAK
-                Column(
-                  children: [
-                    TopStatBox(
-                        color: Colors.redAccent,
-                        text: "Streak: $_streak",
-                        iconWidget: const BeatWidget(child: Icon(Icons.whatshot, color: Colors.redAccent, size: 20))
                     ),
-                    // Spacer to align visually with the top of the left column if needed
-                    const SizedBox(height: 40),
                   ],
                 ),
-              ],
-            ),
-
-            const SizedBox(height: 30),
-
-            // ROTATING CHIP
-            RotationTransition(
-              turns: _rotateController,
-              child: Container(
-                height: 80, width: 80,
-                decoration: BoxDecoration(shape: BoxShape.circle, color: currentChip.color, border: Border.all(color: Colors.white, width: 3), boxShadow: [BoxShadow(color: currentChip.color.withOpacity(0.8), blurRadius: 30, spreadRadius: 5)]),
-                child: Icon(currentChip.icon, size: 40, color: Colors.white),
               ),
+
+              const SizedBox(height: 30),
+
+              // ROTATING CHIP
+              RotationTransition(
+                turns: _rotateController,
+                child: Container(
+                  height: 70, // Shrunk slightly more
+                  width: 70,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: currentChip.color,
+                    border: Border.all(color: Colors.white.withOpacity(0.8), width: 1.5),
+                    boxShadow: [
+                      BoxShadow(color: currentChip.color.withOpacity(0.6), blurRadius: 15, spreadRadius: 2),
+                    ],
+                  ),
+                  child: Icon(currentChip.icon, size: 26, color: Colors.white),
+                ),
+              ),
+
+              const SizedBox(height: 50),
+
+              const JacksLinesTitleAnimator(),
+
+              const SizedBox(height: 80), // Reduced space further
+
+              // BUTTON GRID
+              GridView.count(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisCount: 2,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 1.6, // Wider buttons to save vertical space
+                children: [
+                  _buildGlassButton(
+                      "ONLINE",
+                      Icons.public,
+                      Colors.blueAccent,
+                          () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PlayOnlineScreen()))
+                  ),
+                  _buildGlassButton(
+                      "FRIENDS",
+                      Icons.people_alt,
+                      Colors.amber,
+                          () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FriendsScreen()))
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 10),
+
+              // CENTERED PRACTICE BUTTON
+              _buildGlassButton(
+                "PRACTICE",
+                Icons.psychology,
+                Colors.purpleAccent,
+                _showDifficultyDialog,
+                width: MediaQuery.of(context).size.width * 0.42,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGlassButton(String title, IconData icon, Color color, VoidCallback onTap, {double? width}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+          child: Container(
+            width: width,
+            height: width != null ? width / 1.5 : null, // Maintain ratio for standalone button
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.05),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: color.withOpacity(0.3), width: 1.2),
             ),
-            const SizedBox(height: 20),
-
-            const JacksLinesTitleAnimator(),
-
-            const SizedBox(height: 50),
-
-            // BUTTONS
-            Row(
+            child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Expanded(child: BigGameButton(title: "Play Friends", icon: Icons.group_add, color: Colors.blueAccent, onTap: () {})),
-                const SizedBox(width: 20),
-                Expanded(child: BigGameButton(title: "Play Online", icon: Icons.public, color: Colors.green, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const GameBoard(isOnline: true))))),
+                Icon(icon, size: 28, color: color),
+                const SizedBox(height: 4),
+                Text(
+                    title,
+                    style: TextStyle(
+                        color: color,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 11,
+                        letterSpacing: 1.0
+                    )
+                ),
               ],
             ),
-
-            // OFFLINE BUTTON (Smaller Height)
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: BigGameButton(
-                title: "Play Offline",
-                icon: Icons.wifi_off,
-                color: Colors.purpleAccent,
-                onTap: _showDifficultyDialog,
-                height: 100, // Reduced Height
-              ),
-            ),
-
-            const SizedBox(height: 20),
-          ],
+          ),
         ),
       ),
     );
@@ -353,9 +482,12 @@ class JacksLinesTitleAnimator extends StatefulWidget {
   const JacksLinesTitleAnimator({super.key});
 
   @override
-  State<JacksLinesTitleAnimator> createState() => _JacksLinesTitleAnimatorState();
+  State<JacksLinesTitleAnimator> createState() =>
+      _JacksLinesTitleAnimatorState();
 }
-class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with SingleTickerProviderStateMixin {
+
+class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator>
+    with SingleTickerProviderStateMixin {
   late ConfettiController _confettiController;
   double _lineWidth = 0.0;
   bool _showChip = false;
@@ -365,7 +497,9 @@ class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with 
   @override
   void initState() {
     super.initState();
-    _confettiController = ConfettiController(duration: const Duration(seconds: 1));
+    _confettiController = ConfettiController(
+      duration: const Duration(seconds: 1),
+    );
     _startAnimationLoop();
   }
 
@@ -378,7 +512,7 @@ class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with 
 
   void _startAnimationLoop() {
     _loopTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if(mounted) _playRandomScenario();
+      if (mounted) _playRandomScenario();
     });
   }
 
@@ -399,7 +533,6 @@ class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with 
       if (!mounted) return;
       setState(() => _glowColor = Colors.green.withOpacity(0.8));
       _confettiController.play();
-
     } else {
       setState(() => _lineWidth = 140.0);
       await Future.delayed(const Duration(milliseconds: 400));
@@ -431,7 +564,13 @@ class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with 
             confettiController: _confettiController,
             blastDirectionality: BlastDirectionality.explosive,
             shouldLoop: false,
-            colors: const [Colors.green, Colors.blue, Colors.pink, Colors.orange, Colors.purple],
+            colors: const [
+              Colors.green,
+              Colors.blue,
+              Colors.pink,
+              Colors.orange,
+              Colors.purple,
+            ],
           ),
           AnimatedContainer(
             duration: const Duration(milliseconds: 500),
@@ -463,7 +602,9 @@ class _JacksLinesTitleAnimatorState extends State<JacksLinesTitleAnimator> with 
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(3),
-                boxShadow: const [BoxShadow(color: Colors.black45, offset: Offset(2,2))],
+                boxShadow: const [
+                  BoxShadow(color: Colors.black45, offset: Offset(2, 2)),
+                ],
               ),
             ),
           ),
@@ -484,18 +625,31 @@ class PulseWidget extends StatefulWidget {
   @override
   State<PulseWidget> createState() => _PulseWidgetState();
 }
-class _PulseWidgetState extends State<PulseWidget> with SingleTickerProviderStateMixin {
+
+class _PulseWidgetState extends State<PulseWidget>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
   }
+
   @override
-  void dispose() { _controller.dispose(); super.dispose(); }
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return FadeTransition(opacity: Tween(begin: 0.6, end: 1.0).animate(_controller), child: widget.child);
+    return FadeTransition(
+      opacity: Tween(begin: 0.6, end: 1.0).animate(_controller),
+      child: widget.child,
+    );
   }
 }
 
@@ -505,19 +659,32 @@ class BeatWidget extends StatefulWidget {
   @override
   State<BeatWidget> createState() => _BeatWidgetState();
 }
-class _BeatWidgetState extends State<BeatWidget> with SingleTickerProviderStateMixin {
+
+class _BeatWidgetState extends State<BeatWidget>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 800))..repeat(reverse: true);
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
   }
+
   @override
-  void dispose() { _controller.dispose(); super.dispose(); }
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return ScaleTransition(
-      scale: Tween(begin: 1.0, end: 1.15).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut)),
+      scale: Tween(
+        begin: 1.0,
+        end: 1.15,
+      ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut)),
       child: widget.child,
     );
   }
@@ -528,7 +695,12 @@ class TopStatBox extends StatelessWidget {
   final Widget iconWidget;
   final String text;
   final Color color;
-  const TopStatBox({required this.iconWidget, required this.text, required this.color, super.key});
+  const TopStatBox({
+    required this.iconWidget,
+    required this.text,
+    required this.color,
+    super.key,
+  });
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -543,7 +715,14 @@ class TopStatBox extends StatelessWidget {
         children: [
           iconWidget,
           const SizedBox(width: 8),
-          Text(text, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+            ),
+          ),
         ],
       ),
     );
@@ -563,7 +742,7 @@ class BigGameButton extends StatelessWidget {
     required this.color,
     required this.onTap,
     this.height = 150,
-    super.key
+    super.key,
   });
 
   @override
@@ -576,14 +755,28 @@ class BigGameButton extends StatelessWidget {
           color: color.withOpacity(0.15),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: color, width: 2),
-          boxShadow: [BoxShadow(color: color.withOpacity(0.2), blurRadius: 15, offset: const Offset(0, 5))],
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.2),
+              blurRadius: 15,
+              offset: const Offset(0, 5),
+            ),
+          ],
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(icon, size: 40, color: color),
             const SizedBox(height: 8),
-            Text(title, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ],
         ),
       ),
@@ -595,20 +788,34 @@ class BigGameButton extends StatelessWidget {
 class StreakFireEffect extends StatefulWidget {
   final Widget child;
   final bool isEnabled;
-  const StreakFireEffect({required this.child, this.isEnabled = false, super.key});
+  const StreakFireEffect({
+    required this.child,
+    this.isEnabled = false,
+    super.key,
+  });
 
   @override
   State<StreakFireEffect> createState() => _StreakFireEffectState();
 }
-class _StreakFireEffectState extends State<StreakFireEffect> with SingleTickerProviderStateMixin {
+
+class _StreakFireEffectState extends State<StreakFireEffect>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat(reverse: true);
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    )..repeat(reverse: true);
   }
+
   @override
-  void dispose() { _controller.dispose(); super.dispose(); }
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!widget.isEnabled) return widget.child;
@@ -617,10 +824,18 @@ class _StreakFireEffectState extends State<StreakFireEffect> with SingleTickerPr
       builder: (context, child) {
         return Container(
           decoration: BoxDecoration(
-            shape: BoxShape.circle,
+            borderRadius: BorderRadius.circular(20),
             boxShadow: [
-              BoxShadow(color: Colors.orangeAccent.withOpacity(0.8), blurRadius: 10 + (_controller.value * 5), spreadRadius: 2),
-              BoxShadow(color: Colors.red.withOpacity(0.6), blurRadius: 20 + (_controller.value * 10), spreadRadius: 5 + (_controller.value * 2)),
+              BoxShadow(
+                color: Colors.orangeAccent.withOpacity(0.8),
+                blurRadius: 10 + (_controller.value * 5),
+                spreadRadius: 2,
+              ),
+              BoxShadow(
+                color: Colors.red.withOpacity(0.6),
+                blurRadius: 20 + (_controller.value * 10),
+                spreadRadius: 5 + (_controller.value * 2),
+              ),
             ],
           ),
           child: widget.child,

@@ -18,6 +18,8 @@ import 'arranged_board.dart';
 
 class GameBoard extends StatefulWidget {
   final String difficulty;
+  final int playerCount;
+  final bool isTeamMode;
   final bool isOnline;
   final String? chipId;
   const GameBoard({
@@ -25,6 +27,8 @@ class GameBoard extends StatefulWidget {
     this.difficulty = "Easy",
     this.isOnline = false,
     this.chipId,
+    this.playerCount = 1,
+    this.isTeamMode = false,
   });
 
   @override
@@ -38,6 +42,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   bool isLoading = true;
   String opponentName = "@Opponent";
   String opponentAvatarId = "avatar_1";
+  String _avatarId = "avatar_1";
   String opponentFlag = "🤖";
   int totalCoins = 0;
 
@@ -48,7 +53,15 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   List<String> boardLayout = [];
   final Set<int> cornerIndices = {0, 9, 90, 99};
 
+  int? _partnerHoverIndex;
+  Timer? _botTimer;
+  bool _showAddBotButton = false;
+
   List<Map<String, dynamic>> moveLog = [];
+
+  int currentTurnIndex = 0;
+  List<List<String>> allHands = [];
+  List<Map<String, dynamic>> playersInfo = [];
 
   // Win Logic
   bool isPlayerTurn = true;
@@ -234,9 +247,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         prefs.getString('selected_chip_id') ??
         allGameChips[0].id;
     int coins = prefs.getInt('total_coins') ?? 0;
+    String avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
     if (mounted) {
       setState(() {
         totalCoins = coins;
+        _avatarId = avatarId;
         myChip = allGameChips.firstWhere(
           (c) => c.id == chipId,
           orElse: () => allGameChips[0],
@@ -331,29 +346,35 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     });
   }
 
-  Future<void> _checkForDeadCards() async {
+  Future<void> _checkForDeadCards(List<String> hand, {bool isPlayer = true}) async {
     List<String> deadCards = [];
-    for (String card in playerHand) {
-      if (card.contains('J')) continue;
+    for (String card in hand) {
+      if (card.contains('J')) continue; // Jacks are never dead
       List<int> pos = [];
-      for (int i = 0; i < boardLayout.length; i++)
+      for (int i = 0; i < boardLayout.length; i++) {
         if (boardLayout[i] == card) pos.add(i);
-      if (pos.isNotEmpty && pos.every((idx) => boardState[idx] != 0))
+      }
+      // A card is dead if all its board positions are occupied
+      if (pos.isNotEmpty && pos.every((idx) => boardState[idx] != 0)) {
         deadCards.add(card);
+      }
     }
+
     if (deadCards.isNotEmpty) {
       setState(() => burningCards.addAll(deadCards));
       HapticFeedback.heavyImpact();
-      for (int i = 0; i < 20; i++)
-        particles.add(
-          _AshParticle(Offset(MediaQuery.of(context).size.width / 2, 600)),
-        );
+      // Use existing particle logic
+      for (int i = 0; i < 20; i++) {
+        particles.add(_AshParticle(Offset(MediaQuery.of(context).size.width / 2, 600)));
+      }
+
       await Future.delayed(const Duration(milliseconds: 1200));
       if (!mounted) return;
+
       setState(() {
         for (String dead in deadCards) {
-          playerHand.remove(dead);
-          playerHand.add(_drawCard(isPlayer: true));
+          hand.remove(dead);
+          hand.add(_drawCard(isPlayer: isPlayer));
         }
         burningCards.clear();
       });
@@ -409,9 +430,14 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Future<void> _startOnlineMatchmaking() async {
+    // 1. Initialize the service ONCE
     _onlineService = OnlineService();
+
+    // 2. Set up the game state listener
     _onlineService!.onGameStateChanged = (data) {
       if (!mounted) return;
+
+      // Handle Forfeit
       if (data['status'] == 'forfeit' && !isGameOver) {
         isGameOver = true;
         _turnTimer?.cancel();
@@ -419,71 +445,71 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         _showOpponentLeftDialog();
         return;
       }
+
       if (data['status'] == 'playing') {
         if (isLoading) {
           SoundManager.play('click');
-          _avatarReactionController.forward().then(
-            (_) => _avatarReactionController.reverse(),
-          );
+          _avatarReactionController.forward().then((_) => _avatarReactionController.reverse());
         }
 
-        Future.delayed(const Duration(milliseconds: 800), () {
-          if (!mounted) return;
-          _stopSearchAnimation();
-          String myRole = _onlineService!.myRole;
-          int newPlayerValue = (myRole == 'host') ? 1 : 2;
-          setState(() {
-            isLoading = false;
-            myPlayerValue = newPlayerValue;
-            bool wasPlayerTurn = isPlayerTurn;
-            isPlayerTurn = (data['turn'] == myRole);
-            if (wasPlayerTurn != isPlayerTurn) _startTurnTimer();
-            if (myRole == 'host') {
-              opponentAvatarId = data['guest_avatar'] ?? "avatar_1";
-              opponentName = data['guest_name'] ?? "Guest";
-              aiChip = allGameChips.firstWhere(
-                (c) => c.id == (data['guest_chip_id'] ?? "default_red"),
-                orElse: () => allGameChips[0],
-              );
-            } else {
-              opponentAvatarId = data['host_avatar'] ?? "avatar_1";
-              opponentName = data['host_name'] ?? "Host";
-              aiChip = allGameChips.firstWhere(
-                (c) => c.id == (data['host_chip_id'] ?? "default_blue"),
-                orElse: () => allGameChips[1],
-              );
-            }
-            if (data['board'] != null) {
-              List<dynamic> cloudBoard = data['board'];
-              for (int i = 0; i < 100; i++)
-                if (cloudBoard[i] is int) boardState[i] = cloudBoard[i];
-            }
-            if (data['last_move'] != null) {
-              lastPlacedChipIndex = data['last_move']['index'];
-              if (data['last_move']['card'] != null)
-                lastUsedCard = data['last_move']['card'];
-            }
-            checkForWin();
-          });
-          if (playerHand.isEmpty) {
-            _dealInitialHands();
-            _startTurnTimer();
+        setState(() {
+          isLoading = false;
+
+          // SYNC TURN AND PLAYERS
+          currentTurnIndex = data['turn_index'] ?? 0;
+          if (data['players'] != null) {
+            Map pMap = data['players'];
+            playersInfo = pMap.values.map((v) => Map<String, dynamic>.from(v)).toList();
           }
-          _setupChatListener();
+
+          // Determine local player's chip value
+          String myRole = _onlineService!.myRole;
+          int mySlotIndex = int.parse(myRole.split('_').last);
+          myPlayerValue = _getPlayerChipValue(mySlotIndex);
+
+          // SYNC BOARD
+          if (data['board'] != null) {
+            List<dynamic> cloudBoard = data['board'];
+            for (int i = 0; i < 100; i++) {
+              if (cloudBoard[i] is int) boardState[i] = cloudBoard[i];
+            }
+          }
+
+          // SYNC LAST MOVE
+          if (data['last_move'] != null) {
+            lastPlacedChipIndex = data['last_move']['index'];
+            lastUsedCard = data['last_move']['card'];
+          }
+
+          _stopSearchAnimation();
+          _startTurnTimer();
+          checkForWin();
+
+          // NEW: Handle Partner Hovers for 2v2
+          if (widget.isTeamMode && data['hovers'] != null) {
+            int mySlot = int.parse(_onlineService!.myRole.split('_').last);
+            int partnerSlot = (mySlot + 2) % 4; // Partner logic: 0-2, 1-3
+            _partnerHoverIndex = data['hovers']['player_$partnerSlot'];
+          }
         });
+
+        if (allHands.isEmpty) {
+          _dealInitialHands();
+        }
+        _setupChatListener();
       }
     };
 
-    _onlineService!.onSoundReceived = (soundName) {
-      if (!mounted) return;
-      setState(() => isSoundPlaying = true);
-      SoundManager.play(soundName);
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) setState(() => isSoundPlaying = false);
-      });
-    };
+    _botTimer = Timer(const Duration(seconds: 30), () {
+      if (mounted && isLoading) setState(() => _showAddBotButton = true);
+    });
 
-    await _onlineService!.findMatch(chipId: myChip.id);
+    // 3. Start the actual matchmaking
+    await _onlineService!.findMultiplayerMatch(
+      targetPlayers: widget.playerCount,
+      isTeam: widget.isTeamMode,
+      chipId: myChip.id,
+    );
   }
 
   void _setupChatListener() {
@@ -528,10 +554,26 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   void _dealInitialHands() {
     deck = DeckManager.createFullDeck()..shuffle();
+
+    allHands = List.generate(max(2, widget.playerCount), (_) => []);
+    playerHand.clear();
+    opponentHand.clear();
+
     for (int i = 0; i < 7; i++) {
-      playerHand.add(deck.removeLast());
-      opponentHand.add(deck.removeLast());
+      for (int p = 0; p < allHands.length; p++) {
+        String card = deck.removeLast();
+        allHands[p].add(card);
+        // Ensure offline hands are filled too
+        if (p == 0) playerHand.add(card);
+        if (p == 1) opponentHand.add(card);
+      }
     }
+  }
+
+  int _getPlayerChipValue(int playerIndex) {
+    if (!widget.isTeamMode) return playerIndex + 1;
+    // Team 1: 0 & 2 -> Value 1. Team 2: 1 & 3 -> Value 2.
+    return (playerIndex % 2) + 1;
   }
 
   void _startOfflineGame() {
@@ -539,7 +581,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     setState(() {
       isLoading = false;
       isPlayerTurn = true;
-      opponentName = "Offline AI";
+      currentTurnIndex = 0;
+      opponentName = "Offline";
       opponentFlag = "🤖";
     });
     _startTurnTimer();
@@ -566,35 +609,59 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     Navigator.pop(context);
   }
 
+// Update _onBoardTap in lib/screens/game/game_board.dart
   void _onBoardTap(int index) {
-    if (!isPlayerTurn || isGameOver || selectedCard == null) return;
+    int mySlotIndex = int.parse(_onlineService?.myRole.split('_').last ?? "0");
+
+    // Ensure we only act on our turn
+    if (currentTurnIndex != mySlotIndex || isGameOver || selectedCard == null) return;
+
+    int myChipValue = _getPlayerChipValue(mySlotIndex);
     if (cornerIndices.contains(index)) return;
+
     String targetCard = boardLayout[index];
-    bool isRedJack = selectedCard!.contains('H') || selectedCard!.contains('D');
-    bool isBlackJack =
-        selectedCard!.contains('C') || selectedCard!.contains('S');
     bool isJack = selectedCard!.contains('J');
+    bool isRedJack = isJack && (selectedCard!.contains('H') || selectedCard!.contains('D'));
+    bool isBlackJack = isJack && (selectedCard!.contains('C') || selectedCard!.contains('S'));
+
     bool success = false;
+
     if (isJack) {
-      if (isBlackJack) {
-        if (boardState[index] == 0) success = true;
-      } else if (isRedJack) {
-        if (boardState[index] != 0 && boardState[index] != myPlayerValue) {
-          if (!_isChipLocked(index)) {
-            _executeMove(index, 0);
-            return;
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Cannot remove sequence!")),
-            );
-            return;
-          }
+      if (isBlackJack && boardState[index] == 0) success = true; // Anywhere empty
+      else if (isRedJack && boardState[index] != 0 && boardState[index] != myChipValue) {
+        if (!_isChipLocked(index)) {
+          _executeMove(index, 0); // Red Jacks remove chips
+          return;
         }
       }
     } else {
       if (targetCard == selectedCard && boardState[index] == 0) success = true;
     }
-    if (success) _executeMove(index, myPlayerValue);
+
+    if (success) {
+      if (widget.isOnline) {
+        // ONLINE: Send to server and let the listener update the board
+        int nextTurn = (currentTurnIndex + 1) % widget.playerCount;
+        _onlineService?.sendMultiplayerMove(index, selectedCard!, myChipValue, nextTurn);
+
+        setState(() {
+          allHands[mySlotIndex].remove(selectedCard);
+          allHands[mySlotIndex].add(_drawCard(isPlayer: true));
+          selectedCard = null;
+        });
+      } else {
+        // OFFLINE: Execute locally and finish the turn to trigger AI
+        setState(() {
+          boardState[index] = myChipValue;
+          lastPlacedChipIndex = index;
+          lastUsedCard = selectedCard;
+          playerHand.remove(selectedCard);
+          if (deck.isNotEmpty) playerHand.add(_drawCard(isPlayer: true));
+          selectedCard = null;
+        });
+        _finishTurn(isPlayer: true);
+      }
+    }
   }
 
   void _executeMove(int index, int value) {
@@ -658,9 +725,13 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     return false;
   }
 
-  void _finishTurn({required bool isPlayer}) {
+  void _finishTurn({required bool isPlayer}) async {
     checkForWin();
     if (isGameOver) return;
+
+    // Trigger the dead card check for the player who just finished
+    await _checkForDeadCards(isPlayer ? playerHand : opponentHand, isPlayer: isPlayer);
+
     if (isPlayer) {
       setState(() {
         isPlayerTurn = false;
@@ -683,9 +754,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     return Offset(x, y);
   }
 
-  Future<void> _startAiTurn() async {
-    await Future.delayed(const Duration(milliseconds: 1000));
-    if (!mounted) return;
+  Future<void> _startAiTurn() async { //
+    await Future.delayed(const Duration(milliseconds: 1000)); //
+    if (!mounted) return; //
+
     AiMove? move = AiLogic.findBestMove(
       opponentHand,
       boardState,
@@ -693,106 +765,103 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       currentAiDifficulty,
       2,
     );
+
     if (move != null) {
-      Offset target = _getBoardCellCenter(move.index);
-      setState(() {
-        opponentSelectedCard = move.cardUsed;
-        aiCursorPosition = Offset(MediaQuery.of(context).size.width / 2, 40);
-      });
-      await Future.delayed(const Duration(milliseconds: 50));
-      setState(() => aiCursorPosition = target);
-      await Future.delayed(const Duration(milliseconds: 800));
-      if (!mounted) return;
-      setState(() {
-        if (move.isRemoval)
-          boardState[move.index] = 0;
-        else {
-          boardState[move.index] = 2;
-          lastPlacedChipIndex = move.index;
-        }
-        lastUsedCard = move.cardUsed;
-        opponentHand.remove(move.cardUsed);
-        opponentSelectedCard = null;
-        aiCursorPosition = null;
-        if (deck.isNotEmpty) opponentHand.add(deck.removeLast());
-      });
+      if (move.isDiscard) { //
+        // AI "burns" the card - update the UI so the player sees what happened
+        setState(() {
+          lastUsedCard = move.cardUsed;
+          opponentSelectedCard = move.cardUsed;
+        });
+        await Future.delayed(const Duration(milliseconds: 800)); // Give player time to see it
+      } else {
+        // Normal move logic
+        Offset target = _getBoardCellCenter(move.index); //
+        setState(() {
+          opponentSelectedCard = move.cardUsed;
+          aiCursorPosition = Offset(MediaQuery.of(context).size.width / 2, 40); //
+        });
+
+        await Future.delayed(const Duration(milliseconds: 50)); //
+        setState(() => aiCursorPosition = target); //
+        await Future.delayed(const Duration(milliseconds: 800)); //
+
+        if (!mounted) return;
+        setState(() {
+          if (move.isRemoval) { //
+            boardState[move.index] = 0; //
+          } else {
+            boardState[move.index] = 2; //
+            lastPlacedChipIndex = move.index; //
+          }
+          lastUsedCard = move.cardUsed; //
+          opponentHand.remove(move.cardUsed); //
+          opponentSelectedCard = null; //
+          aiCursorPosition = null; //
+          if (deck.isNotEmpty) opponentHand.add(deck.removeLast()); //
+        });
+      }
     }
-    _finishTurn(isPlayer: false);
+
+    // Ensure this is called AFTER the if(move != null) block concludes
+    _finishTurn(isPlayer: false); //
   }
 
   void checkForWin() {
+    // 1v1v1 needs 1 sequence. 1v1 and 2v2 need 2 sequences.
+    int winTarget = (widget.playerCount == 3) ? 1 : 2;
+
+    // Track sequences for each chip value (1, 2, or 3)
+    Map<int, int> teamSequences = {1: 0, 2: 0, 3: 0};
     List<List<int>> potential = [];
+
+    // Standard grid check (Rows, Cols, Diagonals)
     for (int i = 0; i < 100; i++) {
       if (i % 10 <= 5) _checkLine(i, 1, potential);
       if (i < 60) _checkLine(i, 10, potential);
       if (i % 10 <= 5 && i < 60) _checkLine(i, 11, potential);
       if (i % 10 >= 4 && i < 60) _checkLine(i, 9, potential);
     }
+
     winningSequences.clear();
-    Set<int> p1Used = {}, p2Used = {};
-    int p1Count = 0, p2Count = 0;
+    // Simplified multiplayer sequence tracking
     for (var seq in potential) {
-      int owner = 0;
-      for (int idx in seq)
-        if (!cornerIndices.contains(idx)) {
-          owner = boardState[idx];
-          break;
-        }
-      if (owner == 0) continue;
-      Set<int> target = (owner == 1) ? p1Used : p2Used;
-      int overlap = 0;
-      for (int idx in seq) if (target.contains(idx)) overlap++;
-      if (overlap <= 1) {
-        winningSequences.add(seq);
-        target.addAll(seq);
-        if (owner == 1)
-          p1Count++;
-        else
-          p2Count++;
+      // Find owner of the first non-corner chip in the line
+      int firstChipIdx = seq.firstWhere((idx) => !cornerIndices.contains(idx), orElse: () => -1);
+      if (firstChipIdx == -1) continue;
+
+      int ownerValue = boardState[firstChipIdx];
+      if (ownerValue == 0) continue;
+
+      teamSequences[ownerValue] = (teamSequences[ownerValue] ?? 0) + 1;
+
+      if (teamSequences[ownerValue]! >= winTarget) {
+        _triggerVictory(ownerValue);
+        return;
       }
     }
-    if (p2Count == 1 &&
-        widget.difficulty == "Hard" &&
-        currentAiDifficulty == "Hard")
-      setState(() {
-        currentAiDifficulty = "Medium";
-        opponentFlag = Random().nextBool() ? "😵" : "🥴";
-      });
-    if ((p1Count == 1 || p2Count == 1) && !isGameOver) {
-      if (!isSuddenDeath) {
-        setState(() => isSuddenDeath = true);
-        HapticFeedback.heavyImpact();
-      }
-    }
-    if (p1Count >= 2 || p2Count >= 2) {
+  }
+
+  void _triggerVictory(int winnerValue) {
+    if (isGameOver) return;
+
+    setState(() {
       isGameOver = true;
       _turnTimer?.cancel();
-      bool iWon =
-          (myPlayerValue == 1 && p1Count >= 2) ||
-          (myPlayerValue == 2 && p2Count >= 2);
-      if (iWon && widget.isOnline) {
-        setState(() {
-          for (var seq in winningSequences) {
-            bool mine = false;
-            for (int idx in seq) {
-              if (!cornerIndices.contains(idx)) {
-                if (boardState[idx] == myPlayerValue) mine = true;
-                break;
-              }
-            }
-            if (mine) shimmeringIndices.addAll(seq);
-          }
-        });
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) setState(() => shimmeringIndices.clear());
-        });
-      }
-      if (iWon) _confettiController.play();
-      if (widget.isOnline)
-        _onlineService?.recordGameEnd(won: iWon, opponentName: opponentName);
-      _recordGameResult(won: iWon);
-      _showGameOverDialog(iWon);
+    });
+
+    // Determine if the local player won based on their chip value
+    bool iWon = (myPlayerValue == winnerValue);
+
+    if (iWon) {
+      _confettiController.play();
+      SoundManager.play('win');
+    } else {
+      SoundManager.play('fail');
     }
+
+    _recordGameResult(won: iWon);
+    _showGameOverDialog(iWon);
   }
 
   void _checkLine(int start, int step, List<List<int>> target) {
@@ -922,10 +991,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                 ],
               ),
               Positioned(
-                bottom: -30,
+                bottom: 0,
                 left: 0,
                 right: 0,
-                height: 160,
+                height: 180,
                 child: GestureDetector(
                   onPanUpdate: (details) =>
                       setState(() => hoverPosition = details.localPosition),
@@ -933,7 +1002,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                   child: _buildFannedHand(),
                 ),
               ),
-              Positioned(right: 16, bottom: 110, child: _buildDecks()),
+              Positioned(right: 20, bottom: 100, child: _buildDecks()),
               if (aiCursorPosition != null)
                 AnimatedPositioned(
                   duration: const Duration(milliseconds: 600),
@@ -1140,101 +1209,150 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Widget _buildDecks() {
-    return Row(
+    return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Only the Discard Pile
         if (lastUsedCard != null)
           Transform.rotate(
-            angle: 0.1,
+            angle: 0.05,
             child: _buildRealCard(
               lastUsedCard!,
-              width: 50,
-              height: 70,
-              rankSize: 12,
-              suitSize: 22,
+              width: 45,
+              height: 60,
+              rankSize: 14,
+              suitSize: 24,
             ),
           )
         else
           Container(
-            width: 50,
-            height: 70,
+            width: 55, height: 80,
             decoration: BoxDecoration(
-              color: Colors.white10,
+              color: Colors.white.withOpacity(0.05),
               borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Colors.white10),
             ),
-            child: const Center(
-              child: Text(
-                "Discard",
-                style: TextStyle(color: Colors.white24, fontSize: 10),
-              ),
-            ),
+            child: const Center(child: Icon(Icons.history, color: Colors.white10)),
           ),
+        const SizedBox(height: 5),
+        const Text("DISCARD", style: TextStyle(color: Colors.white30, fontSize: 9, fontWeight: FontWeight.bold)),
       ],
     );
   }
 
   Widget _buildGameHeader() {
-    AvatarItem opponent = getAvatarById(opponentAvatarId);
+    // Determine the number of players to display
+    int displayCount = widget.isOnline ? widget.playerCount : 2;
+    double sw = MediaQuery.of(context).size.width;
+    double slotWidth = sw / displayCount;
+
+    // Determine the Turn Bar Color for 2v2 Team Mode
+    Color indicatorColor = Colors.amber; // Default
+    if (widget.isTeamMode && widget.playerCount == 4) {
+      // Team 1: Slots 0 & 2 (Red), Team 2: Slots 1 & 3 (Blue)
+      indicatorColor = (currentTurnIndex % 2 == 0) ? Colors.redAccent : Colors.blueAccent;
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: const BoxDecoration(
-        color: Color(0xFF252525),
-        border: Border(bottom: BorderSide(color: Colors.white10)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      height: 65,
+      color: const Color(0xFF252525),
+      child: Stack(
         children: [
-          Row(
-            children: [
-              IconButton(
-                icon: const Icon(
-                  Icons.arrow_back_ios,
-                  color: Colors.white,
-                  size: 20,
-                ),
-                onPressed: _handleExit,
-              ),
-              const SizedBox(width: 5),
-              Stack(
-                alignment: Alignment.bottomRight,
-                children: [
-                  CircleAvatar(
-                    radius: 20,
-                    backgroundColor: opponent.color,
-                    child: Icon(opponent.icon, size: 20, color: Colors.white),
-                  ),
-                  if (!widget.isOnline)
-                    Text(opponentFlag, style: const TextStyle(fontSize: 14)),
-                ],
-              ),
-              const SizedBox(width: 10),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    opponentName,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  Text(
-                    isPlayerTurn ? "Waiting..." : "Playing",
-                    style: TextStyle(
-                      color: isPlayerTurn ? Colors.grey : Colors.greenAccent,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-            ],
+          // 1. DYNAMIC TIMER BAR (At the very top)
+          Container(
+            height: 3,
+            width: sw * (_turnTimeRemaining / 60),
+            color: _turnTimeRemaining < 10 ? Colors.red : indicatorColor,
           ),
-          Text(
-            "$_turnTimeRemaining",
-            style: TextStyle(
-              color: _turnTimeRemaining <= 10 ? Colors.red : Colors.white,
-              fontWeight: FontWeight.bold,
+
+          // 2. ANIMATED TURN INDICATOR (The shifting bar)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeInOutCubic,
+            bottom: 0,
+            left: currentTurnIndex * slotWidth,
+            child: Container(
+              height: 3,
+              width: slotWidth,
+              color: indicatorColor,
             ),
+          ),
+
+          // 3. PLAYER SLOTS
+          Row(
+            children: List.generate(displayCount, (index) {
+              bool isCurrent = (currentTurnIndex == index);
+              var p = playersInfo.length > index ? playersInfo[index] : null;
+
+              // Resolve Avatar Data
+              String avatarId = p?['avatar'] ?? (index == 0 ? _avatarId : opponentAvatarId);
+              AvatarItem avatar = allAvatars.firstWhere(
+                    (a) => a.id == avatarId,
+                orElse: () => allAvatars[0],
+              );
+
+              // Connection Status (Green if online, Red if offline)
+              bool isOffline = p?['status'] == 'offline';
+              Color statusColor = isOffline ? Colors.red : Colors.greenAccent;
+
+              return Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (isCurrent)
+                      Text(
+                        "$_turnTimeRemaining",
+                        style: TextStyle(color: indicatorColor, fontWeight: FontWeight.bold, fontSize: 10),
+                      ),
+
+                    // AVATAR PULSE & CONNECTION STATUS
+                    Stack(
+                      alignment: Alignment.bottomRight,
+                      children: [
+                        // IDEA 1: Avatar Pulse using TweenAnimationBuilder
+                        TweenAnimationBuilder<double>(
+                          tween: Tween<double>(begin: 1.0, end: isCurrent ? 1.2 : 1.0),
+                          duration: const Duration(milliseconds: 500),
+                          builder: (context, scale, child) {
+                            return Transform.scale(
+                              scale: scale,
+                              child: CircleAvatar(
+                                radius: 14,
+                                backgroundColor: avatar.color.withOpacity(0.2),
+                                child: Icon(avatar.icon, size: 16, color: avatar.color),
+                              ),
+                            );
+                          },
+                        ),
+
+                        // IDEA 2: Connection Status Dot
+                        if (widget.isOnline)
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: statusColor,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: const Color(0xFF252525), width: 1.5),
+                            ),
+                          ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 2),
+                    Text(
+                      index == 0 ? "YOU" : (p?['name'] ?? opponentName),
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isCurrent ? Colors.white : Colors.white38,
+                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              );
+            }),
           ),
         ],
       ),
@@ -1242,56 +1360,63 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Widget _buildFannedHand() {
-    if (playerHand.isEmpty) return const SizedBox();
+    List<String> currentHand = widget.isOnline
+        ? (allHands.isNotEmpty ? allHands[int.parse(_onlineService!.myRole.split('_').last)] : [])
+        : playerHand;
+
+    if (currentHand.isEmpty) return const SizedBox();
+
     double sw = MediaQuery.of(context).size.width;
-    if (selectedCard != null && !playerHand.contains(selectedCard))
-      selectedCard = null;
-    int sIdx = (selectedCard != null) ? playerHand.indexOf(selectedCard!) : -1;
+    int sIdx = (selectedCard != null) ? currentHand.indexOf(selectedCard!) : -1;
+    int totalCards = currentHand.length;
+
+    // --- Physical Hand Physics ---
+    double cardWidth = 50;
+    double cardHeight = 75;
+    double radius = 250; // Distance to the "pivot" point under the screen
+    double angleStep = 0.15; // Gap between cards in radians
+    // -----------------------------
+
     return Stack(
       alignment: Alignment.bottomCenter,
-      children: List.generate(playerHand.length, (i) {
-        String c = playerHand[i];
+      clipBehavior: Clip.none,
+      children: List.generate(totalCards, (i) {
+        String c = currentHand[i];
         bool isS = (i == sIdx);
-        bool isB = burningCards.contains(c);
-        double rel = i - (playerHand.length - 1) / 2;
-        double t = hoverPosition != null
-            ? (hoverPosition!.dx - ((sw / 2) + (rel * 35))).clamp(-20, 20) *
-                  0.005
-            : 0.0;
-        double x = rel * 35;
-        if (sIdx != -1) {
-          if (i < sIdx) x -= 25;
-          if (i > sIdx) x += 25;
-        }
+
+        // Calculate angle: center card is 0, others are negative/positive
+        double relativeIndex = i - (totalCards - 1) / 2.0;
+        double angle = relativeIndex * angleStep;
+
+        // Trigonometry for the arc position
+        double xOffset = radius * sin(angle);
+        double yOffset = radius * (1 - cos(angle));
+
+        // Selection lift
+        double lift = isS ? 40 : 0;
+
         return AnimatedPositioned(
-          key: ValueKey("c_$i"),
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-          left: (sw / 2) + x - 30,
-          bottom: isS ? 65 : 50 - (rel * rel * 2.0),
-          child: AnimatedScale(
-            duration: const Duration(milliseconds: 1000),
-            scale: isB ? 0.0 : 1.0,
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 800),
-              opacity: isB ? 0.0 : 1.0,
-              child: Transform.rotate(
-                angle: isS ? 0 : (rel * 0.08) + t,
-                child: GestureDetector(
-                  onTap: () {
-                    if (isPlayerTurn && !isB)
-                      setState(() => selectedCard = isS ? null : c);
-                  },
-                  child: _buildRealCard(
-                    c,
-                    width: 60,
-                    height: 90,
-                    isSelected: isS,
-                    suitSize: 32,
-                    rankSize: 18,
-                    isBurning: isB,
-                  ),
-                ),
+          key: ValueKey("fan_card_$c"),
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOutBack,
+          // Center of screen + horizontal arc - half card width
+          left: (sw / 2) + xOffset - (cardWidth / 2),
+          // Bottom of screen + lift - vertical arc drop
+          bottom: 30 + lift - yOffset,
+          child: Transform.rotate(
+            angle: angle,
+            alignment: Alignment.bottomCenter,
+            child: GestureDetector(
+              onTap: () {
+                if (isPlayerTurn) setState(() => selectedCard = isS ? null : c);
+              },
+              child: _buildRealCard(
+                c,
+                width: cardWidth,
+                height: cardHeight,
+                isSelected: isS,
+                rankSize: 12,
+                suitSize: 20,
               ),
             ),
           ),
@@ -1325,13 +1450,13 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       height: height,
       decoration: BoxDecoration(
         color: isBurning
-            ? Colors.black87
+            ? Colors.grey[800]
             : (isGF ? Colors.amber[50] : Colors.white),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(4),
         border: Border.all(
           color: isSelected
               ? Colors.amber
-              : (isGF ? Colors.amberAccent : Colors.grey[300]!),
+              : (isGF ? Colors.amberAccent : Colors.grey[400]!),
           width: isSelected ? 3 : (isGF ? 2 : 1),
         ),
         boxShadow: [
@@ -1418,6 +1543,18 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                 ),
               ),
             ),
+
+          if (isBurning)
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, color: Colors.redAccent, size: 40),
+              ),
+            ),
         ],
       ),
     );
@@ -1461,46 +1598,49 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   Widget _buildBoardSquare(int index) {
     String c = boardLayout[index];
-    int owner = boardState[index];
+    int ownerValue = boardState[index];
     bool isC = cornerIndices.contains(index);
-    return GestureDetector(
-      onTap: () => _onBoardTap(index),
-      child: Container(
-        decoration: BoxDecoration(
-          color: isC ? const Color(0xFF222222) : Colors.transparent,
-        ),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            if (!isC)
-              _buildRealCard(
-                c,
-                width: sw * 0.1,
-                height: sw * 0.15,
-                isSelected: false,
-                rankSize: 10,
-                suitSize: 14,
-              ),
-            if (isC) const Icon(Icons.stars, size: 24, color: Colors.amber),
-            if (owner != 0)
-              _buildChipWidget(
-                owner == myPlayerValue ? myChip : aiChip,
-                lastIndex: index,
-              ),
-            for (var seq in winningSequences)
-              if (seq.contains(index))
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.greenAccent, width: 3),
-                  ),
+    bool isPartnerHovering = index == _partnerHoverIndex;
+
+    return MouseRegion( // Optional: to detect local hovers to send to partner
+      onEnter: (_) => _onlineService?.sendHover(index),
+      onExit: (_) => _onlineService?.sendHover(null),
+      child: GestureDetector(
+        onTap: () => _onBoardTap(index),
+        child: Container(
+          decoration: BoxDecoration(color: isC ? const Color(0xFF222222) : Colors.transparent),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              if (!isC) _buildRealCard(c, width: sw * 0.1, height: sw * 0.15, rankSize: 10, suitSize: 14),
+              if (isC) const Icon(Icons.stars, size: 24, color: Colors.amber),
+
+              // 1. Show the permanent chip if it exists
+              if (ownerValue != 0)
+                _buildChipWidget(
+                  _getChipForValue(ownerValue),
+                  lastIndex: index,
                 ),
-          ],
+
+              // 2. NEW: Show the faint "Ghost Chip" for partner hover
+              if (ownerValue == 0 && isPartnerHovering && widget.isTeamMode)
+                Opacity(
+                  opacity: 0.3,
+                  child: _buildChipWidget(myChip), // Use your chip color for your partner
+                ),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  GameChip _getChipForValue(int value) {
+    if (value == myPlayerValue) return myChip;
+    // Map value to a fallback from allGameChips based on its ID
+    if (value == 1) return allGameChips[2]; // Ruby Red
+    if (value == 2) return allGameChips[0]; // Classic Blue
+    return allGameChips[6]; // Toxic Green
   }
 
   Widget _buildSearchScreen() {

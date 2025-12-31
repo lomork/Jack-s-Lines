@@ -1,23 +1,31 @@
 import 'dart:math';
 import '../smart_deck/deck_manager.dart';
 
+enum BotPersonality { aggressive, builder, balanced }
+
 class AiMove {
   final int index;
   final bool isRemoval;
-  final String cardUsed; // --- NEW: Track which card AI decided to use ---
+  final bool isDiscard;
+  final String cardUsed;
 
-  AiMove({required this.index, required this.cardUsed, this.isRemoval = false});
+  AiMove({
+    required this.index,
+    required this.cardUsed,
+    this.isRemoval = false,
+    this.isDiscard = false,
+  });
 }
 
 class AiLogic {
-
   static AiMove? findBestMove(
-      List<String> aiHand,
-      List<int> boardState,
-      List<String> boardLayout,
-      String difficulty,
-      int aiPlayerId
-      ) {
+    List<String> aiHand,
+    List<int> boardState,
+    List<String> boardLayout,
+    String difficulty,
+    int aiPlayerId,
+      {BotPersonality personality = BotPersonality.balanced})
+  {
     bool isHard = difficulty == "Hard";
     bool isMedium = difficulty == "Medium";
 
@@ -44,10 +52,11 @@ class AiLogic {
           }
 
           if (canPlace) {
-            possibleMoves.add(AiMove(index: i, cardUsed: card, isRemoval: false));
+            possibleMoves.add(
+              AiMove(index: i, cardUsed: card, isRemoval: false),
+            );
           }
         }
-
         // REMOVAL LOGIC
         else if (isJack && isRedJack && owner != 0 && owner != aiPlayerId) {
           // AI checks if this chip is part of a sequence before trying to remove
@@ -57,33 +66,53 @@ class AiLogic {
       }
     }
 
-    if (possibleMoves.isEmpty) return null;
+    if (possibleMoves.isEmpty) {
+      // If no moves, check for a dead card to discard
+      for (String card in aiHand) {
+        if (card.contains('J')) continue;
+        List<int> pos = [];
+        for (int i = 0; i < 100; i++) if (boardLayout[i] == card) pos.add(i);
+
+        if (pos.isNotEmpty && pos.every((idx) => boardState[idx] != 0)) {
+          return AiMove(index: -1, cardUsed: card, isDiscard: true);
+        }
+      }
+      return null;
+    }
 
     AiMove? bestMove;
     double bestScore = -1000;
 
     for (var move in possibleMoves) {
       double score = 0;
+      int oppId = (aiPlayerId == 1) ? 2 : 1;
 
       if (move.isRemoval) {
-        score += 30; // Base removal value
-        // --- NEW: Prioritize blocking player's building lines ---
-        int oppNeighbors = _countNeighbors(move.index, boardState, (aiPlayerId == 1 ? 2 : 1));
-        score += (oppNeighbors * 20); // Remove chips that are helping player
+        // AGGRESSIVE bots love removing your chips
+        score += (personality == BotPersonality.aggressive) ? 50 : 30;
+        int oppNeighbors = _countNeighbors(move.index, boardState, oppId);
+        score += (oppNeighbors * 20);
       } else {
-        // Placing: Build your own line
         int neighbors = _countNeighbors(move.index, boardState, aiPlayerId);
-        score += (neighbors * 15);
+        int oppNeighbors = _countNeighbors(move.index, boardState, oppId);
 
-        // --- NEW: Actively Block Player ---
-        int oppNeighbors = _countNeighbors(move.index, boardState, (aiPlayerId == 1 ? 2 : 1));
-        if (oppNeighbors >= 3) {
-          score += 100; // Strong desire to block player's near-complete line
+        if (personality == BotPersonality.builder) {
+          score += (neighbors * 25);
+          score += (oppNeighbors * 5); // Cares less about blocking
+        }
+
+        else if (personality == BotPersonality.aggressive) {
+          score += (neighbors * 10);
+          score += (oppNeighbors * 40);
         }
 
         // Wild card conservation
         if (move.cardUsed.contains('J')) {
           score -= 10; // Try to save Jacks unless they are very useful
+        }
+        else { // Balanced
+          score += (neighbors * 15);
+          score += (oppNeighbors * 20);
         }
       }
 

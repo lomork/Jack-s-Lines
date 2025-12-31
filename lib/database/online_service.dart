@@ -124,6 +124,37 @@ class OnlineService {
     }
   }
 
+  Future<void> sendHover(int? index) async {
+    if (_gameId == null) return;
+    await _db.child('games/$_gameId/hovers/$_playerRole').set(index);
+  }
+
+  Future<void> fillWithBots(int targetPlayers) async {
+    final personalities = ['aggressive', 'builder', 'balanced'];
+    final random = Random();
+
+    //if (_gameId == null) return;
+    for (int i = 0; i < targetPlayers; i++) {
+      String slot = "player_$i";
+      final snap = await _db.child('games/$_gameId/players/$slot').get();
+      if (!snap.exists) {
+        await _db.child('games/$_gameId/players/$slot').set({
+          'id': 'bot_$i',
+          'name': "CPU ${i + 1}",
+          'avatar': "avatar_3",
+          'personality': personalities[random.nextInt(personalities.length)],
+          'is_bot': true,
+        });
+      }
+    }
+    await _db.child('games/$_gameId').update({'status': 'playing'});
+  }
+
+  void setupDisconnectListener() {
+    if (_gameId == null || _playerRole == null) return;
+    _db.child('games/$_gameId/players/$_playerRole/status').onDisconnect().set('offline');
+  }
+
   Future<Map<String, dynamic>?> getUserProfile() async {
     User? user = _auth.currentUser;
     if (user == null) return null;
@@ -227,9 +258,10 @@ class OnlineService {
     _gameSubscription = _db.child('games/$_gameId').onValue.listen((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
       if (data != null && onGameStateChanged != null) {
+        // Just pass the data to the GameBoard; let the UI handle its own state
         onGameStateChanged!(Map<String, dynamic>.from(data));
 
-        // Handle sounds
+        // Handle sounds (KEEP this logic here)
         if (data['last_sound'] != null) {
           final soundData = data['last_sound'];
           final int? soundTime = soundData['time'];
@@ -453,4 +485,80 @@ class OnlineService {
     _gameId = null;
     _playerRole = null;
   }
+
+  Future<void> findMultiplayerMatch({required int targetPlayers, required bool isTeam, String? chipId}) async {
+    final prefs = await SharedPreferences.getInstance();
+    _myId = FirebaseAuth.instance.currentUser?.uid ?? "Guest_${Random().nextInt(999)}";
+
+    String myName = prefs.getString('unique_handle') ?? "Player";
+    String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
+
+    // Mode-specific lobby key
+    final String modeKey = "${targetPlayers}_players_${isTeam ? "team" : "solo"}";
+
+    final snapshot = await _db.child('games')
+        .orderByChild('config')
+        .equalTo(modeKey)
+        .get();
+
+    String? foundGameId;
+    int mySlot = 0;
+
+    if (snapshot.exists) {
+      Map games = snapshot.value as Map;
+      for (var id in games.keys) {
+        if (games[id]['status'] == 'waiting') {
+          foundGameId = id;
+          Map players = games[id]['players'] ?? {};
+          mySlot = players.length;
+          break;
+        }
+      }
+    }
+
+    if (foundGameId != null) {
+      _gameId = foundGameId;
+      _playerRole = "player_$mySlot";
+      await _db.child('games/$_gameId/players/$_playerRole').set({
+        'id': _myId,
+        'name': myName,
+        'avatar': myAvatar,
+        'chip_id': chipId ?? "default_blue",
+      });
+
+      if (mySlot == targetPlayers - 1) {
+        // Lobby full, let's roll
+        await _db.child('games/$_gameId').update({'status': 'playing'});
+      }
+    } else {
+      _gameId = _db.child('games').push().key;
+      _playerRole = "player_0";
+      await _db.child('games/$_gameId').set({
+        'status': 'waiting',
+        'config': modeKey,
+        'player_count': targetPlayers,
+        'is_team': isTeam,
+        'turn_index': 0,
+        'board': List.filled(100, 0),
+        'players': {
+          'player_0': {
+            'id': _myId,
+            'name': myName,
+            'avatar': myAvatar,
+            'chip_id': chipId ?? "default_red",
+          }
+        }
+      });
+    }
+    _listenToGame();
+  }
+  Future<void> sendMultiplayerMove(int index, String card, int playerValue, int nextTurn) async {
+    if (_gameId == null) return;
+    await _db.child('games/$_gameId').update({
+      'board/$index': playerValue,
+      'last_move': {'card': card, 'index': index, 'player': _playerRole},
+      'turn_index': nextTurn,
+    });
+  }
+
 }
