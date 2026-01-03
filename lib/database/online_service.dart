@@ -446,25 +446,33 @@ class OnlineService {
   // --- PRESENCE & CLEANUP ---
 
   void setupPresence() {
+    if (_myId == null) return;
     final user = _auth.currentUser;
     if (user == null) return;
 
     final presenceRef = _db.child('presence/${user.uid}');
     final publicStatusRef = _db.child('public_profiles/${user.uid}/status');
 
+    // Listen to the special '.info/connected' node to detect client-side connection status
     FirebaseDatabase.instance.ref('.info/connected').onValue.listen((event) {
       final connected = event.snapshot.value as bool? ?? false;
       if (connected) {
+        // Set status to online when connected
         presenceRef.set('online');
         publicStatusRef.set('online');
 
+        // Use onDisconnect to ensure Firebase cleans up if the app is killed
         presenceRef.onDisconnect().set('offline');
         publicStatusRef.onDisconnect().set('offline');
       }
     });
   }
 
-  void leaveGame() {
+  Future<void> leaveGame() async {
+    if (_gameId != null && _playerRole != null) {
+      // Explicitly set offline if leaving normally
+      await _db.child('games/$_gameId/players/$_playerRole/status').set('offline');
+    }
     _gameSubscription?.cancel();
     _gameId = null;
     _playerRole = null;

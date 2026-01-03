@@ -41,6 +41,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   GameChip aiChip = allGameChips[1];
   bool isLoading = true;
   String opponentName = "@Opponent";
+  String _myHandle = "Player";
   String opponentAvatarId = "avatar_1";
   String _avatarId = "avatar_1";
   String opponentFlag = "🤖";
@@ -105,8 +106,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     "comment5.mp3",
     "comment6.mp3",
     "error.mp3",
-    "card_shuffle.mp3",
-    "click.mp3",
     "fail.mp3",
     "win.mp3",
     "win2.mp3",
@@ -248,10 +247,12 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         allGameChips[0].id;
     int coins = prefs.getInt('total_coins') ?? 0;
     String avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
+    String handle = prefs.getString('unique_handle') ?? "Player";
     if (mounted) {
       setState(() {
         totalCoins = coins;
         _avatarId = avatarId;
+        _myHandle = handle;
         myChip = allGameChips.firstWhere(
           (c) => c.id == chipId,
           orElse: () => allGameChips[0],
@@ -346,7 +347,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     });
   }
 
-  Future<void> _checkForDeadCards(List<String> hand, {bool isPlayer = true}) async {
+  Future<void> _checkForDeadCards(
+    List<String> hand, {
+    bool isPlayer = true,
+  }) async {
     List<String> deadCards = [];
     for (String card in hand) {
       if (card.contains('J')) continue; // Jacks are never dead
@@ -365,7 +369,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       HapticFeedback.heavyImpact();
       // Use existing particle logic
       for (int i = 0; i < 20; i++) {
-        particles.add(_AshParticle(Offset(MediaQuery.of(context).size.width / 2, 600)));
+        particles.add(
+          _AshParticle(Offset(MediaQuery.of(context).size.width / 2, 600)),
+        );
       }
 
       await Future.delayed(const Duration(milliseconds: 1200));
@@ -395,34 +401,26 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2C),
-        title: const Text(
-          "Quit Game?",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("QUIT MATCH?", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         content: const Text(
-          "Leaving now counts as a LOSS. Opponent wins by forfeit.",
-          style: TextStyle(color: Colors.white70),
+          "Abandoning this match will count as an immediate LOSS and reset your streak. Are you sure?",
+          style: TextStyle(color: Colors.white70, fontSize: 13),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text("CANCEL", style: TextStyle(color: Colors.grey)),
+            child: const Text("STAY", style: TextStyle(color: Colors.cyanAccent)),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
+              Navigator.pop(context); // Step 1: Close Dialog
               _recordGameResult(won: false);
-              _onlineService?.sendForfeit();
-              _onlineService?.leaveGame();
-              Navigator.pop(context);
+              _onlineService?.sendForfeit(); // Step 2: Notify others
+              _onlineService?.leaveGame();   // Step 3: Cleanup
+              Navigator.pop(context);        // Step 4: Return to Menu
             },
-            child: const Text(
-              "ABANDON",
-              style: TextStyle(
-                color: Colors.redAccent,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            child: const Text("ABANDON", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -430,44 +428,58 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Future<void> _startOnlineMatchmaking() async {
-    // 1. Initialize the service ONCE
     _onlineService = OnlineService();
 
-    // 2. Set up the game state listener
     _onlineService!.onGameStateChanged = (data) {
       if (!mounted) return;
 
-      // Handle Forfeit
+      // SYNC PLAYER INFO
+      if (data['players'] != null) {
+        setState(() {
+          Map pMap = data['players'];
+          // Sort keys (player_0, player_1) to ensure consistent ordering
+          var sortedKeys = pMap.keys.toList()..sort();
+          playersInfo = sortedKeys
+              .map((k) => Map<String, dynamic>.from(pMap[k]))
+              .toList();
+        });
+      }
+      // Monitor for other players going offline during the match
+      if (data['status'] == 'playing' && !isGameOver) {
+        for (var p in playersInfo) {
+          if (p['id'] != FirebaseAuth.instance.currentUser?.uid && p['status'] == 'offline') {
+            // If an opponent goes offline, wait 5 seconds before declaring forfeit
+            // (to account for brief network blips)
+            Future.delayed(const Duration(seconds: 5), () {
+              if (mounted) _checkAndForfeit();
+            });
+          }
+        }
+      }
+
       if (data['status'] == 'forfeit' && !isGameOver) {
-        isGameOver = true;
-        _turnTimer?.cancel();
-        _recordGameResult(won: true);
-        _showOpponentLeftDialog();
+        _triggerVictoryByForfeit();
         return;
       }
 
+      // 2. HANDLE MATCH START
       if (data['status'] == 'playing') {
         if (isLoading) {
-          SoundManager.play('click');
-          _avatarReactionController.forward().then((_) => _avatarReactionController.reverse());
+          SoundManager.play('card_shuffle');
+          _avatarReactionController.forward().then(
+            (_) => _avatarReactionController.reverse(),
+          );
+          //_onlineService!.setupPresence(_onlineService!.currentGameId!, _onlineService!.myRole);
         }
 
         setState(() {
           isLoading = false;
-
-          // SYNC TURN AND PLAYERS
           currentTurnIndex = data['turn_index'] ?? 0;
-          if (data['players'] != null) {
-            Map pMap = data['players'];
-            playersInfo = pMap.values.map((v) => Map<String, dynamic>.from(v)).toList();
-          }
 
-          // Determine local player's chip value
           String myRole = _onlineService!.myRole;
           int mySlotIndex = int.parse(myRole.split('_').last);
           myPlayerValue = _getPlayerChipValue(mySlotIndex);
 
-          // SYNC BOARD
           if (data['board'] != null) {
             List<dynamic> cloudBoard = data['board'];
             for (int i = 0; i < 100; i++) {
@@ -475,7 +487,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
             }
           }
 
-          // SYNC LAST MOVE
           if (data['last_move'] != null) {
             lastPlacedChipIndex = data['last_move']['index'];
             lastUsedCard = data['last_move']['card'];
@@ -484,19 +495,18 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           _stopSearchAnimation();
           _startTurnTimer();
           checkForWin();
-
-          // NEW: Handle Partner Hovers for 2v2
-          if (widget.isTeamMode && data['hovers'] != null) {
-            int mySlot = int.parse(_onlineService!.myRole.split('_').last);
-            int partnerSlot = (mySlot + 2) % 4; // Partner logic: 0-2, 1-3
-            _partnerHoverIndex = data['hovers']['player_$partnerSlot'];
-          }
         });
 
-        if (allHands.isEmpty) {
-          _dealInitialHands();
-        }
+        if (allHands.isEmpty) _dealInitialHands();
         _setupChatListener();
+      }
+
+      // Handle Forfeit
+      if (data['status'] == 'forfeit' && !isGameOver) {
+        isGameOver = true;
+        _turnTimer?.cancel();
+        _recordGameResult(won: true);
+        _showOpponentLeftDialog();
       }
     };
 
@@ -504,12 +514,37 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       if (mounted && isLoading) setState(() => _showAddBotButton = true);
     });
 
-    // 3. Start the actual matchmaking
     await _onlineService!.findMultiplayerMatch(
       targetPlayers: widget.playerCount,
       isTeam: widget.isTeamMode,
       chipId: myChip.id,
     );
+  }
+
+  void _triggerVictoryByForfeit() {
+    setState(() {
+      isGameOver = true;
+      _turnTimer?.cancel();
+    });
+    _recordGameResult(won: true);
+    _showOpponentLeftDialog();
+  }
+
+  void _checkAndForfeit() {
+    if (isGameOver) return;
+
+    // Check if any opponent is offline
+    bool opponentGone = false;
+    for (var p in playersInfo) {
+      if (p['id'] != FirebaseAuth.instance.currentUser?.uid && p['status'] == 'offline') {
+        opponentGone = true;
+        break;
+      }
+    }
+
+    if (opponentGone) {
+      _triggerVictoryByForfeit();
+    }
   }
 
   void _setupChatListener() {
@@ -609,26 +644,32 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     Navigator.pop(context);
   }
 
-// Update _onBoardTap in lib/screens/game/game_board.dart
+  // Update _onBoardTap in lib/screens/game/game_board.dart
   void _onBoardTap(int index) {
     int mySlotIndex = int.parse(_onlineService?.myRole.split('_').last ?? "0");
 
     // Ensure we only act on our turn
-    if (currentTurnIndex != mySlotIndex || isGameOver || selectedCard == null) return;
+    if (currentTurnIndex != mySlotIndex || isGameOver || selectedCard == null)
+      return;
 
     int myChipValue = _getPlayerChipValue(mySlotIndex);
     if (cornerIndices.contains(index)) return;
 
     String targetCard = boardLayout[index];
     bool isJack = selectedCard!.contains('J');
-    bool isRedJack = isJack && (selectedCard!.contains('H') || selectedCard!.contains('D'));
-    bool isBlackJack = isJack && (selectedCard!.contains('C') || selectedCard!.contains('S'));
+    bool isRedJack =
+        isJack && (selectedCard!.contains('H') || selectedCard!.contains('D'));
+    bool isBlackJack =
+        isJack && (selectedCard!.contains('C') || selectedCard!.contains('S'));
 
     bool success = false;
 
     if (isJack) {
-      if (isBlackJack && boardState[index] == 0) success = true; // Anywhere empty
-      else if (isRedJack && boardState[index] != 0 && boardState[index] != myChipValue) {
+      if (isBlackJack && boardState[index] == 0)
+        success = true; // Anywhere empty
+      else if (isRedJack &&
+          boardState[index] != 0 &&
+          boardState[index] != myChipValue) {
         if (!_isChipLocked(index)) {
           _executeMove(index, 0); // Red Jacks remove chips
           return;
@@ -642,7 +683,12 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       if (widget.isOnline) {
         // ONLINE: Send to server and let the listener update the board
         int nextTurn = (currentTurnIndex + 1) % widget.playerCount;
-        _onlineService?.sendMultiplayerMove(index, selectedCard!, myChipValue, nextTurn);
+        _onlineService?.sendMultiplayerMove(
+          index,
+          selectedCard!,
+          myChipValue,
+          nextTurn,
+        );
 
         setState(() {
           allHands[mySlotIndex].remove(selectedCard);
@@ -730,7 +776,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     if (isGameOver) return;
 
     // Trigger the dead card check for the player who just finished
-    await _checkForDeadCards(isPlayer ? playerHand : opponentHand, isPlayer: isPlayer);
+    await _checkForDeadCards(
+      isPlayer ? playerHand : opponentHand,
+      isPlayer: isPlayer,
+    );
 
     if (isPlayer) {
       setState(() {
@@ -754,7 +803,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     return Offset(x, y);
   }
 
-  Future<void> _startAiTurn() async { //
+  Future<void> _startAiTurn() async {
+    //
     await Future.delayed(const Duration(milliseconds: 1000)); //
     if (!mounted) return; //
 
@@ -767,19 +817,25 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     );
 
     if (move != null) {
-      if (move.isDiscard) { //
+      if (move.isDiscard) {
+        //
         // AI "burns" the card - update the UI so the player sees what happened
         setState(() {
           lastUsedCard = move.cardUsed;
           opponentSelectedCard = move.cardUsed;
         });
-        await Future.delayed(const Duration(milliseconds: 800)); // Give player time to see it
+        await Future.delayed(
+          const Duration(milliseconds: 800),
+        ); // Give player time to see it
       } else {
         // Normal move logic
         Offset target = _getBoardCellCenter(move.index); //
         setState(() {
           opponentSelectedCard = move.cardUsed;
-          aiCursorPosition = Offset(MediaQuery.of(context).size.width / 2, 40); //
+          aiCursorPosition = Offset(
+            MediaQuery.of(context).size.width / 2,
+            40,
+          ); //
         });
 
         await Future.delayed(const Duration(milliseconds: 50)); //
@@ -788,7 +844,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
         if (!mounted) return;
         setState(() {
-          if (move.isRemoval) { //
+          if (move.isRemoval) {
+            //
             boardState[move.index] = 0; //
           } else {
             boardState[move.index] = 2; //
@@ -827,7 +884,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     // Simplified multiplayer sequence tracking
     for (var seq in potential) {
       // Find owner of the first non-corner chip in the line
-      int firstChipIdx = seq.firstWhere((idx) => !cornerIndices.contains(idx), orElse: () => -1);
+      int firstChipIdx = seq.firstWhere(
+        (idx) => !cornerIndices.contains(idx),
+        orElse: () => -1,
+      );
       if (firstChipIdx == -1) continue;
 
       int ownerValue = boardState[firstChipIdx];
@@ -940,120 +1000,165 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     if (widget.isOnline && isLoading) return _buildSearchScreen();
+
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: AnimatedContainer(
-        duration: const Duration(seconds: 1),
-        color: isSuddenDeath
-            ? const Color(0xFF350505)
-            : const Color(0xFF151515),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              ...particles.map(
-                (p) => Positioned(
-                  left: p.pos.dx,
-                  top: p.pos.dy,
-                  child: Opacity(
-                    opacity: p.life,
-                    child: Container(width: 4, height: 4, color: Colors.grey),
-                  ),
-                ),
-              ),
-              Column(
+
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          double screenH = constraints.maxHeight;
+          double screenW = constraints.maxWidth;
+
+          return AnimatedContainer(
+            duration: const Duration(seconds: 1),
+            color: isSuddenDeath
+                ? const Color(0xFF350505)
+                : const Color(0xFF151515),
+            child: SafeArea(
+              child: Stack(
                 children: [
-                  _buildGameHeader(),
-                  if (!widget.isOnline) _buildAiHand(),
-                  Expanded(
-                    child: Center(
-                      child: AspectRatio(
-                        aspectRatio: 0.70,
+                  ...particles.map(
+                    (p) => Positioned(
+                      left: p.pos.dx,
+                      top: p.pos.dy,
+                      child: Opacity(
+                        opacity: p.life,
                         child: Container(
-                          margin: const EdgeInsets.all(8),
-                          child: GridView.builder(
-                            physics: const NeverScrollableScrollPhysics(),
-                            gridDelegate:
-                                const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 10,
-                                  childAspectRatio: 0.70,
-                                  crossAxisSpacing: 2,
-                                  mainAxisSpacing: 2,
-                                ),
-                            itemCount: 100,
-                            itemBuilder: (context, index) =>
-                                _buildBoardSquare(index),
-                          ),
+                          width: 4,
+                          height: 4,
+                          color: Colors.grey,
                         ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 120),
+                  Column(
+                    children: [
+                      _buildGameHeader(),
+                      if (!widget.isOnline) _buildAiHand(),
+                      Expanded(
+                        child: Center(
+                          child: AspectRatio(
+                            aspectRatio: 0.70,
+                            child: Container(
+                              margin: const EdgeInsets.all(8),
+                              child: GridView.builder(
+                                physics: const NeverScrollableScrollPhysics(),
+                                gridDelegate:
+                                    const SliverGridDelegateWithFixedCrossAxisCount(
+                                      crossAxisCount: 10,
+                                      childAspectRatio: 0.70,
+                                      crossAxisSpacing: 2,
+                                      mainAxisSpacing: 2,
+                                    ),
+                                itemCount: 100,
+                                itemBuilder: (context, index) =>
+                                    _buildBoardSquare(index),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(height: screenH * 0.15),
+                    ],
+                  ),
+                  Positioned(
+                    top: 10,
+                    left: 10,
+                    child: IconButton(
+                      icon: const Icon(Icons.logout, color: Colors.white54, size: 20),
+                      onPressed: _handleExit,
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    height: screenH * 0.22,
+                    child: GestureDetector(
+                      onPanUpdate: (details) =>
+                          setState(() => hoverPosition = details.localPosition),
+                      onPanEnd: (_) => setState(() => hoverPosition = null),
+                      child: _buildFannedHand(),
+                    ),
+                  ),
+                  Positioned(
+                    right: 20,
+                    bottom: screenH * 0.12,
+                    child: _buildDecks(),
+                  ),
+                  if (aiCursorPosition != null)
+                    AnimatedPositioned(
+                      duration: const Duration(milliseconds: 600),
+                      curve: Curves.easeInOutCirc,
+                      left: aiCursorPosition!.dx - 12,
+                      top: aiCursorPosition!.dy - 12,
+                      child: Opacity(
+                        opacity: 0.6,
+                        child: _buildChipWidget(aiChip),
+                      ),
+                    ),
+
+                  Positioned(
+                    bottom: 110,
+                    left: 16,
+                    child: Column(
+                      children: [
+                        if (isSoundBoardOpen) _buildSoundBoardOverlay(),
+                        const SizedBox(height: 10),
+                        FloatingActionButton(
+                          mini: true,
+                          backgroundColor: Colors.white10,
+                          child: Icon(
+                            isSoundPlaying ? Icons.volume_up : Icons.music_note,
+                            color: isSoundPlaying
+                                ? Colors.amber
+                                : Colors.white70,
+                          ),
+                          onPressed: () => setState(
+                            () => isSoundBoardOpen = !isSoundBoardOpen,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  if (widget.isOnline)
+                    Positioned(
+                      top: 70,
+                      right: 16,
+                      child: IconButton(
+                        icon: Icon(
+                          isChatOpen ? Icons.close : Icons.chat_bubble,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () =>
+                            setState(() => isChatOpen = !isChatOpen),
+                      ),
+                    ),
+                  if (isChatOpen) _buildChatOverlay(),
                 ],
               ),
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: 180,
-                child: GestureDetector(
-                  onPanUpdate: (details) =>
-                      setState(() => hoverPosition = details.localPosition),
-                  onPanEnd: (_) => setState(() => hoverPosition = null),
-                  child: _buildFannedHand(),
-                ),
-              ),
-              Positioned(right: 20, bottom: 100, child: _buildDecks()),
-              if (aiCursorPosition != null)
-                AnimatedPositioned(
-                  duration: const Duration(milliseconds: 600),
-                  curve: Curves.easeInOutCirc,
-                  left: aiCursorPosition!.dx - 12,
-                  top: aiCursorPosition!.dy - 12,
-                  child: Opacity(opacity: 0.6, child: _buildChipWidget(aiChip)),
-                ),
-
-              Positioned(
-                bottom: 110,
-                left: 16,
-                child: Column(
-                  children: [
-                    if (isSoundBoardOpen) _buildSoundBoardOverlay(),
-                    const SizedBox(height: 10),
-                    FloatingActionButton(
-                      mini: true,
-                      backgroundColor: Colors.white10,
-                      child: Icon(
-                        isSoundPlaying ? Icons.volume_up : Icons.music_note,
-                        color: isSoundPlaying ? Colors.amber : Colors.white70,
-                      ),
-                      onPressed: () =>
-                          setState(() => isSoundBoardOpen = !isSoundBoardOpen),
-                    ),
-                  ],
-                ),
-              ),
-
-              if (widget.isOnline)
-                Positioned(
-                  top: 70,
-                  right: 16,
-                  child: IconButton(
-                    icon: Icon(
-                      isChatOpen ? Icons.close : Icons.chat_bubble,
-                      color: Colors.white70,
-                    ),
-                    onPressed: () => setState(() => isChatOpen = !isChatOpen),
-                  ),
-                ),
-              if (isChatOpen) _buildChatOverlay(),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       ),
     );
   }
 
   Widget _buildSoundBoardOverlay() {
+
+    final Map<String, String> friendlyNames = {
+      "comment1.mp3": "Bruh!",
+      "comment2.mp3": "Fuck",
+      "comment3.mp3": "Among Us",
+      "comment4.mp3": "Get out",
+      "comment5.mp3": "Dun Dunn Dunnnnnn",
+      "comment6.mp3": "Fart",
+      "error.mp3": "Buzzer",
+      "fail.mp3": "Spongbob",
+      "win2.mp3": "Yaaaaa!",
+    };
+
     return Container(
       height: 200,
       width: 120,
@@ -1068,15 +1173,16 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         separatorBuilder: (c, i) =>
             const Divider(color: Colors.white10, height: 1),
         itemBuilder: (c, i) {
-          String name = soundBoardFiles[i];
+          String fileName = soundBoardFiles[i];
+          String displayName = friendlyNames[fileName] ?? fileName.split('.').first.toUpperCase();
           return GestureDetector(
             onTap: () {
               setState(() {
                 isSoundPlaying = true;
                 isSoundBoardOpen = false;
               });
-              SoundManager.play(name);
-              if (widget.isOnline) _onlineService?.sendSound(name);
+              SoundManager.play(fileName);
+              if (widget.isOnline) _onlineService?.sendSound(fileName);
               Future.delayed(const Duration(seconds: 2), () {
                 if (mounted) setState(() => isSoundPlaying = false);
               });
@@ -1084,7 +1190,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                name.toUpperCase(),
+                fileName.toUpperCase(),
                 style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 10,
@@ -1226,31 +1332,40 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           )
         else
           Container(
-            width: 55, height: 80,
+            width: 55,
+            height: 80,
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(0.05),
               borderRadius: BorderRadius.circular(6),
               border: Border.all(color: Colors.white10),
             ),
-            child: const Center(child: Icon(Icons.history, color: Colors.white10)),
+            child: const Center(
+              child: Icon(Icons.history, color: Colors.white10),
+            ),
           ),
         const SizedBox(height: 5),
-        const Text("DISCARD", style: TextStyle(color: Colors.white30, fontSize: 9, fontWeight: FontWeight.bold)),
+        const Text(
+          "DISCARD",
+          style: TextStyle(
+            color: Colors.white30,
+            fontSize: 9,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
       ],
     );
   }
 
   Widget _buildGameHeader() {
-    // Determine the number of players to display
     int displayCount = widget.isOnline ? widget.playerCount : 2;
     double sw = MediaQuery.of(context).size.width;
     double slotWidth = sw / displayCount;
 
-    // Determine the Turn Bar Color for 2v2 Team Mode
     Color indicatorColor = Colors.amber; // Default
     if (widget.isTeamMode && widget.playerCount == 4) {
-      // Team 1: Slots 0 & 2 (Red), Team 2: Slots 1 & 3 (Blue)
-      indicatorColor = (currentTurnIndex % 2 == 0) ? Colors.redAccent : Colors.blueAccent;
+      indicatorColor = (currentTurnIndex % 2 == 0)
+          ? Colors.redAccent
+          : Colors.blueAccent;
     }
 
     return Container(
@@ -1285,15 +1400,17 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
               var p = playersInfo.length > index ? playersInfo[index] : null;
 
               // Resolve Avatar Data
-              String avatarId = p?['avatar'] ?? (index == 0 ? _avatarId : opponentAvatarId);
+              String avatarId =
+                  p?['avatar'] ?? (index == 0 ? _avatarId : opponentAvatarId);
               AvatarItem avatar = allAvatars.firstWhere(
-                    (a) => a.id == avatarId,
+                (a) => a.id == avatarId,
                 orElse: () => allAvatars[0],
               );
 
-              // Connection Status (Green if online, Red if offline)
               bool isOffline = p?['status'] == 'offline';
               Color statusColor = isOffline ? Colors.red : Colors.greenAccent;
+
+              String displayName = p?['name'] ?? (index == 0 ? _myHandle : opponentName);
 
               return Expanded(
                 child: Column(
@@ -1302,7 +1419,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                     if (isCurrent)
                       Text(
                         "$_turnTimeRemaining",
-                        style: TextStyle(color: indicatorColor, fontWeight: FontWeight.bold, fontSize: 10),
+                        style: TextStyle(
+                          color: indicatorColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 10,
+                        ),
                       ),
 
                     // AVATAR PULSE & CONNECTION STATUS
@@ -1311,7 +1432,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                       children: [
                         // IDEA 1: Avatar Pulse using TweenAnimationBuilder
                         TweenAnimationBuilder<double>(
-                          tween: Tween<double>(begin: 1.0, end: isCurrent ? 1.2 : 1.0),
+                          tween: Tween<double>(
+                            begin: 1.0,
+                            end: isCurrent ? 1.2 : 1.0,
+                          ),
                           duration: const Duration(milliseconds: 500),
                           builder: (context, scale, child) {
                             return Transform.scale(
@@ -1319,7 +1443,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                               child: CircleAvatar(
                                 radius: 14,
                                 backgroundColor: avatar.color.withOpacity(0.2),
-                                child: Icon(avatar.icon, size: 16, color: avatar.color),
+                                child: Icon(
+                                  avatar.icon,
+                                  size: 16,
+                                  color: avatar.color,
+                                ),
                               ),
                             );
                           },
@@ -1333,7 +1461,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                             decoration: BoxDecoration(
                               color: statusColor,
                               shape: BoxShape.circle,
-                              border: Border.all(color: const Color(0xFF252525), width: 1.5),
+                              border: Border.all(
+                                color: const Color(0xFF252525),
+                                width: 1.5,
+                              ),
                             ),
                           ),
                       ],
@@ -1341,11 +1472,13 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
                     const SizedBox(height: 2),
                     Text(
-                      index == 0 ? "YOU" : (p?['name'] ?? opponentName),
+                      displayName,
                       style: TextStyle(
                         fontSize: 10,
                         color: isCurrent ? Colors.white : Colors.white38,
-                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: isCurrent
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -1361,7 +1494,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   Widget _buildFannedHand() {
     List<String> currentHand = widget.isOnline
-        ? (allHands.isNotEmpty ? allHands[int.parse(_onlineService!.myRole.split('_').last)] : [])
+        ? (allHands.isNotEmpty
+              ? allHands[int.parse(_onlineService!.myRole.split('_').last)]
+              : [])
         : playerHand;
 
     if (currentHand.isEmpty) return const SizedBox();
@@ -1370,12 +1505,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     int sIdx = (selectedCard != null) ? currentHand.indexOf(selectedCard!) : -1;
     int totalCards = currentHand.length;
 
-    // --- Physical Hand Physics ---
-    double cardWidth = 50;
-    double cardHeight = 75;
-    double radius = 250; // Distance to the "pivot" point under the screen
-    double angleStep = 0.15; // Gap between cards in radians
-    // -----------------------------
+    double cardWidth = sw * 0.12; // Dynamic width (12% of screen)
+    double cardHeight = cardWidth * 1.5;
+    double radius = sw * 0.6;
+    double angleStep = 0.15;
 
     return Stack(
       alignment: Alignment.bottomCenter,
@@ -1384,24 +1517,18 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         String c = currentHand[i];
         bool isS = (i == sIdx);
 
-        // Calculate angle: center card is 0, others are negative/positive
         double relativeIndex = i - (totalCards - 1) / 2.0;
         double angle = relativeIndex * angleStep;
-
-        // Trigonometry for the arc position
         double xOffset = radius * sin(angle);
         double yOffset = radius * (1 - cos(angle));
-
-        // Selection lift
         double lift = isS ? 40 : 0;
 
         return AnimatedPositioned(
-          key: ValueKey("fan_card_$c"),
+          // FIXED: Added index to key to ensure uniqueness even if card is duplicate
+          key: ValueKey("fan_card_${c}_$i"),
           duration: const Duration(milliseconds: 250),
           curve: Curves.easeOutBack,
-          // Center of screen + horizontal arc - half card width
           left: (sw / 2) + xOffset - (cardWidth / 2),
-          // Bottom of screen + lift - vertical arc drop
           bottom: 30 + lift - yOffset,
           child: Transform.rotate(
             angle: angle,
@@ -1415,8 +1542,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                 width: cardWidth,
                 height: cardHeight,
                 isSelected: isS,
-                rankSize: 12,
-                suitSize: 20,
+                rankSize: cardWidth * 0.25,
+                suitSize: cardWidth * 0.4,
               ),
             ),
           ),
@@ -1552,7 +1679,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                   color: Colors.black54,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.close, color: Colors.redAccent, size: 40),
+                child: const Icon(
+                  Icons.close,
+                  color: Colors.redAccent,
+                  size: 40,
+                ),
               ),
             ),
         ],
@@ -1602,17 +1733,27 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     bool isC = cornerIndices.contains(index);
     bool isPartnerHovering = index == _partnerHoverIndex;
 
-    return MouseRegion( // Optional: to detect local hovers to send to partner
+    return MouseRegion(
+      // Optional: to detect local hovers to send to partner
       onEnter: (_) => _onlineService?.sendHover(index),
       onExit: (_) => _onlineService?.sendHover(null),
       child: GestureDetector(
         onTap: () => _onBoardTap(index),
         child: Container(
-          decoration: BoxDecoration(color: isC ? const Color(0xFF222222) : Colors.transparent),
+          decoration: BoxDecoration(
+            color: isC ? const Color(0xFF222222) : Colors.transparent,
+          ),
           child: Stack(
             alignment: Alignment.center,
             children: [
-              if (!isC) _buildRealCard(c, width: sw * 0.1, height: sw * 0.15, rankSize: 10, suitSize: 14),
+              if (!isC)
+                _buildRealCard(
+                  c,
+                  width: sw * 0.1,
+                  height: sw * 0.15,
+                  rankSize: 10,
+                  suitSize: 14,
+                ),
               if (isC) const Icon(Icons.stars, size: 24, color: Colors.amber),
 
               // 1. Show the permanent chip if it exists
@@ -1626,7 +1767,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
               if (ownerValue == 0 && isPartnerHovering && widget.isTeamMode)
                 Opacity(
                   opacity: 0.3,
-                  child: _buildChipWidget(myChip), // Use your chip color for your partner
+                  child: _buildChipWidget(
+                    myChip,
+                  ), // Use your chip color for your partner
                 ),
             ],
           ),
@@ -1644,118 +1787,139 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Widget _buildSearchScreen() {
+    String modeTitle = widget.playerCount == 3
+        ? "TRIPLE THREAT"
+        : (widget.isTeamMode ? "2 v 2 TEAM BATTLE" : "1 v 1 DUEL");
+
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
-      body: Stack(
-        alignment: Alignment.center,
-        children: [
-          AnimatedBuilder(
-            animation: _textPulseController,
-            builder: (context, child) => Container(
-              width: 400,
-              height: 400,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: RadialGradient(
-                  colors: [
-                    Colors.blue.withOpacity(0.05 * _textPulseController.value),
-                    Colors.transparent,
-                  ],
-                ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              modeTitle,
+              style: const TextStyle(
+                color: Colors.cyanAccent,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 3,
+                fontSize: 18,
               ),
             ),
-          ),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              ScaleTransition(
-                scale: Tween(begin: 1.0, end: 1.3).animate(
-                  CurvedAnimation(
-                    parent: _avatarReactionController,
-                    curve: Curves.elasticOut,
+            const SizedBox(height: 10),
+            Text(
+              "WAITING FOR PLAYERS (${playersInfo.length}/${widget.playerCount})",
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+            const SizedBox(height: 50),
+
+            // LOBBY SLOTS
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(widget.playerCount, (index) {
+                bool isFilled = playersInfo.length > index;
+                var p = isFilled ? playersInfo[index] : null;
+
+                AvatarItem? avatar;
+                if (isFilled) {
+                  avatar = allAvatars.firstWhere(
+                    (a) => a.id == p!['avatar'],
+                    orElse: () => allAvatars[0],
+                  );
+                }
+
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Column(
+                    children: [
+                      Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          // Slot Background
+                          Container(
+                            width: 70,
+                            height: 70,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isFilled
+                                    ? (avatar?.color ?? Colors.blue)
+                                    : Colors.white10,
+                                width: 2,
+                              ),
+                              color: isFilled
+                                  ? (avatar?.color.withOpacity(0.1))
+                                  : Colors.black26,
+                            ),
+                          ),
+                          if (isFilled)
+                            Icon(avatar!.icon, size: 35, color: avatar.color)
+                          else
+                            const Icon(
+                              Icons.person_outline,
+                              size: 30,
+                              color: Colors.white10,
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        isFilled ? p!['name'] : "Empty...",
+                        style: TextStyle(
+                          color: isFilled ? Colors.white : Colors.white24,
+                          fontSize: 11,
+                          fontWeight: isFilled
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      if (isFilled && index == 0)
+                        const Text(
+                          "HOST",
+                          style: TextStyle(
+                            color: Colors.amber,
+                            fontSize: 8,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                    ],
                   ),
-                ),
-                child: const CircleAvatar(
-                  radius: 50,
-                  backgroundColor: Colors.white10,
-                  child: Icon(Icons.person, size: 60, color: Colors.white30),
-                ),
-              ),
-              const SizedBox(height: 30),
-              RotationTransition(
-                turns: _searchingRotateController,
-                child: const Icon(
-                  Icons.blur_circular,
-                  color: Colors.cyanAccent,
-                  size: 100,
-                ),
-              ),
-              const SizedBox(height: 40),
-              FadeTransition(
-                opacity: Tween(
-                  begin: 0.5,
-                  end: 1.0,
-                ).animate(_textPulseController),
-                child: Text(
-                  _statusMessages[_statusIndex],
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 2,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                "ETA: ${max(1, 20 - _seconds)}s",
-                style: const TextStyle(color: Colors.grey, fontSize: 14),
-              ),
-              const SizedBox(height: 40),
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 40),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(15),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 500),
-                  child: Text(
-                    _proTips[_tipIndex],
-                    key: ValueKey(_tipIndex),
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 12,
-                      fontStyle: FontStyle.italic,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 40),
-              _buildOnlineStatus(),
-              const SizedBox(height: 50),
+                );
+              }),
+            ),
+
+            const SizedBox(height: 60),
+            if (_showAddBotButton && _onlineService?.myRole == "player_0")
               CupertinoButton(
-                color: Colors.redAccent.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(30),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 40,
-                  vertical: 12,
-                ),
-                onPressed: _cancelSearch,
+                color: Colors.orangeAccent.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(20),
+                onPressed: () =>
+                    _onlineService?.fillWithBots(widget.playerCount),
                 child: const Text(
-                  "CANCEL",
+                  "FILL WITH BOTS",
                   style: TextStyle(
-                    color: Colors.white,
+                    color: Colors.orangeAccent,
+                    fontSize: 14,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
+              )
+            else
+              const CircularProgressIndicator(
+                color: Colors.cyanAccent,
+                strokeWidth: 2,
               ),
-            ],
-          ),
-        ],
+
+            const SizedBox(height: 40),
+            CupertinoButton(
+              onPressed: _cancelSearch,
+              child: const Text(
+                "CANCEL",
+                style: TextStyle(color: Colors.redAccent, fontSize: 14),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
