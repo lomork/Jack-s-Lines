@@ -4,7 +4,8 @@ import 'dart:ui';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
+import '../screens/game/play_online.dart';
+import '../screens/game/game_board.dart';
 
 
 class OnlineService {
@@ -846,30 +847,6 @@ class OnlineService {
       g['turn_index'] = nextTurn;
 
       return Transaction.success(g);
-    });
-  }
-
-  void startNotificationListener() {
-    if (_myId == null) return;
-
-    _db.child('notifications/$_myId').onChildAdded.listen((event) {
-      if (event.snapshot.value == null) return;
-      final data = Map<String, dynamic>.from(event.snapshot.value as Map);
-
-      // If someone accepted your game
-      if (data['type'] == 'game_accept') {
-        // TRIGGER LOCAL NOTIFICATION HERE
-        // NotificationManager.show("Game Ready", "${data['from_name']} accepted your challenge! Come back!");
-
-        // Also remove the notification so it doesn't pop up again
-        event.snapshot.ref.remove();
-
-        // Auto-join the game
-        _gameId = data['game_id'];
-        _playerRole = 'host';
-        _listenToGame();
-        onMatchFound?.call(); // Triggers UI navigation
-      }
     });
   }
 
