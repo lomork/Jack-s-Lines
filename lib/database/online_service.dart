@@ -5,6 +5,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+
+
 class OnlineService {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
   final FirebaseAuth _auth = FirebaseAuth.instance;
@@ -20,12 +22,54 @@ class OnlineService {
   Function(Map<String, dynamic>)? onGameStateChanged;
   Function(String)? onGameError;
   Function(String)? onSoundReceived;
-  Function(String)? onBurnEffectReceived; // NEW: Callback for burn animation
+  Function(String)? onBurnEffectReceived;
 
   VoidCallback? onMatchFound;
 
   String? get currentGameId => _gameId;
   String get myRole => _playerRole ?? "spectator";
+
+  // --- Match Reconnection ---
+
+  Future<void> _saveCurrentGameSession(String gameId, String role) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_game_id', gameId);
+    await prefs.setString('last_player_role', role);
+  }
+
+  Future<void> _clearGameSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('last_game_id');
+    await prefs.remove('last_player_role');
+  }
+
+  /// Attempts to rejoin an active game if the app crashed or disconnected
+  Future<bool> tryReconnect() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastGameId = prefs.getString('last_game_id');
+    final lastRole = prefs.getString('last_player_role');
+
+    if (lastGameId == null || lastRole == null) return false;
+
+    try {
+      final snapshot = await _db.child('games/$lastGameId').get();
+      if (snapshot.exists) {
+        final data = Map<String, dynamic>.from(snapshot.value as Map);
+        // Only reconnect if the game is still active
+        if (data['status'] == 'playing' || data['status'] == 'waiting') {
+          _gameId = lastGameId;
+          _playerRole = lastRole;
+          _myId = _auth.currentUser?.uid;
+          _listenToGame();
+          return true;
+        }
+      }
+    } catch (e) {
+      print("Reconnection failed: $e");
+    }
+    await _clearGameSession();
+    return false;
+  }
 
   // --- MAINTENANCE & CONFIG ---
 
@@ -65,7 +109,7 @@ class OnlineService {
         'public_profiles/${user.uid}': {
           'username': username,
           'username_lowercase': username.toLowerCase(),
-          'avatar': avatar,
+          'avatars': avatar,
           'last_seen': ServerValue.timestamp,
           'search_index': _generateSearchIndex(username),
         },
@@ -95,10 +139,13 @@ class OnlineService {
           .get();
 
       if (snapshot.exists) {
-        final data = snapshot.value as Map<dynamic, dynamic>;
+        final Object? value = snapshot.value;
+        if (value is! Map) return [];
+
+        final data = Map<dynamic, dynamic>.from(value);
         return data.entries.map((e) {
           final val = Map<String, dynamic>.from(e.value as Map);
-          val['uid'] = e.key;
+          val['uid'] = e.key.toString();
           return val;
         }).toList();
       }
@@ -106,6 +153,134 @@ class OnlineService {
       print("CRITICAL: Search failed. Error: $e");
     }
     return [];
+  }
+
+  Future<void> sendGameInvite(String friendUid, String myName) async {
+    if (_myId == null) return;
+
+    // 1. Create a private game lobby
+    String gameId = _db.child('games').push().key!;
+
+    // 2. Setup the game entry
+    await _db.child('games/$gameId').set({
+      'status': 'waiting',
+      'host_id': _myId,
+      'host_name': myName,
+      'created_at': ServerValue.timestamp,
+      'is_private': true, // Mark as private so random matchmakers don't join
+      'invited_player': friendUid,
+    });
+
+    // 3. Send a notification to the friend
+    await _db.child('notifications/$friendUid').push().set({
+      'type': 'game_invite',
+      'from_uid': _myId,
+      'from_name': myName,
+      'game_id': gameId,
+      'timestamp': ServerValue.timestamp,
+    });
+
+    // 4. Join yourself and wait
+    _gameId = gameId;
+    _playerRole = "host";
+    _listenToGame();
+  }
+
+  // --- NEW: Fetch Realtime Presence ---
+  Stream<DatabaseEvent> getUserPresenceStream(String uid) {
+    return _db.child('presence/$uid').onValue;
+  }
+
+  Stream<List<Map<String, dynamic>>> getGameInvitesStream() {
+    if (_myId == null) return const Stream.empty();
+
+    // Listen to notifications node for type 'game_invite'
+    return _db.child('notifications/$_myId').onValue.map((event) {
+      final List<Map<String, dynamic>> invites = [];
+      if (event.snapshot.exists && event.snapshot.value is Map) {
+        final data = Map<String, dynamic>.from(event.snapshot.value as Map);
+        data.forEach((key, value) {
+          final val = Map<String, dynamic>.from(value);
+          if (val['type'] == 'game_invite') {
+            val['key'] = key; // Store the notification ID so we can delete it
+            invites.add(val);
+          }
+        });
+      }
+      // Sort by newest first
+      invites.sort((a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
+      return invites;
+    });
+  }
+
+  Future<void> acceptGameInvite(Map<String, dynamic> invite) async {
+    final String gameId = invite['game_id'];
+    final String notifKey = invite['key'];
+
+    // Join the game
+    await _db.child('games/$gameId').update({
+      'status': 'playing',
+      'guest_id': _myId,
+      'guest_name': await _getMyHandle(), // Helper method (see below)
+      'guest_avatar': await _getMyAvatar(),
+      'match_start_time': ServerValue.timestamp,
+    });
+
+    // Delete the invitation notification
+    await _db.child('notifications/$_myId/$notifKey').remove();
+
+    // Notify the host that we accepted (This triggers their "Come Back" notification)
+    await _db.child('notifications/${invite['from_uid']}').push().set({
+      'type': 'game_accept',
+      'from_uid': _myId,
+      'from_name': await _getMyHandle(),
+      'game_id': gameId,
+      'timestamp': ServerValue.timestamp,
+    });
+
+    // Set local state
+    _gameId = gameId;
+    _playerRole = 'guest';
+    _listenToGame();
+  }
+
+  Future<void> rejectGameInvite(String notifKey) async {
+    if (_myId != null) {
+      await _db.child('notifications/$_myId/$notifKey').remove();
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getCompletedGames() async {
+    if (_myId == null) return [];
+
+    // fetch all games (Optimization: Create a specific 'user_games/$uid' node in the future)
+    final snapshot = await _db.child('games').orderByChild('status').equalTo('finished').get();
+
+    List<Map<String, dynamic>> myGames = [];
+    if (snapshot.exists) {
+      final data = Map<String, dynamic>.from(snapshot.value as Map);
+      data.forEach((key, value) {
+        final g = Map<String, dynamic>.from(value);
+        // Check if I was a player
+        if (g['host_id'] == _myId || g['guest_id'] == _myId) {
+          g['id'] = key;
+          myGames.add(g);
+        }
+      });
+    }
+    // Sort by newest
+    myGames.sort((a, b) => (b['match_start_time'] ?? 0).compareTo(a['match_start_time'] ?? 0));
+    return myGames;
+  }
+
+  Future<String> _getMyHandle() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('unique_handle') ?? "Player";
+  }
+
+  Future<String> _getMyAvatar() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('selected_avatar_id') ?? "avatar_1";
   }
 
   Future<void> saveUserProfile(Map<String, dynamic> data) async {
@@ -116,7 +291,7 @@ class OnlineService {
       if (data.containsKey('username')) {
         await updateProfile(
             username: data['username'],
-            avatar: data['avatar'] ?? "avatar_1"
+            avatar: data['avatars'] ?? "avatar_1"
         );
       }
     } catch (e) {
@@ -141,7 +316,7 @@ class OnlineService {
         await _db.child('games/$_gameId/players/$slot').set({
           'id': 'bot_$i',
           'name': "CPU ${i + 1}",
-          'avatar': "avatar_3",
+          'avatars': "avatar_3",
           'personality': personalities[random.nextInt(personalities.length)],
           'is_bot': true,
         });
@@ -204,50 +379,91 @@ class OnlineService {
 
   Future<void> findMatch({String? chipId}) async {
     final prefs = await SharedPreferences.getInstance();
+    _myId = _auth.currentUser?.uid ?? prefs.getString('unique_id');
 
-    User? user = _auth.currentUser;
-    _myId = user?.uid ?? prefs.getString('unique_id') ?? "Player_${Random().nextInt(9999)}";
-
-    String myHandle = prefs.getString('unique_handle') ?? user?.displayName ?? "Player";
+    String myHandle = prefs.getString('unique_handle') ?? "Player";
     String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
 
     try {
-      final snapshot = await _db.child('games').orderByChild('status').equalTo('waiting').limitToFirst(1).get();
+      final snapshot = await _db.child('games')
+          .orderByChild('status')
+          .equalTo('waiting')
+          .get();
 
-      if (snapshot.exists && snapshot.value is Map) {
-        Map<dynamic, dynamic> games = snapshot.value as Map;
-        _gameId = games.keys.first;
-        _playerRole = "guest";
+      String? targetGameId;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final twoMinutesAgo = now - (2 * 60 * 1000);
 
-        await _db.child('games/$_gameId').update({
-          'status': 'playing',
-          'guest_id': _myId,
-          'guest_name': myHandle,
-          'guest_avatar': myAvatar,
-          'guest_chip_id': chipId ?? "default_red",
-          'match_start_time': ServerValue.timestamp,
-        });
-        await _db.child('lobby').child(_gameId!).remove();
-        onMatchFound?.call();
-      } else {
-        _gameId = _db.child('games').push().key;
-        _playerRole = "host";
+      if (snapshot.exists) {
+        final games = Map<dynamic, dynamic>.from(snapshot.value as Map);
+        for (var id in games.keys) {
+          final g = games[id];
+          final createdAt = g['created_at'] ?? 0;
 
-        await _db.child('games/$_gameId').set({
-          'status': 'waiting',
-          'host_id': _myId,
-          'host_name': myHandle,
-          'host_avatar': myAvatar,
-          'host_chip_id': chipId ?? "default_blue",
-          'turn': 'host',
-          'board': List.filled(100, 0),
-          'last_move': null,
-          'last_sound': null,
-          'last_burn': null, // Tracking burn events
-        });
-        await _db.child('lobby').child(_gameId!).set(_myId);
+          if (createdAt < twoMinutesAgo) {
+            _db.child('games/$id').remove();
+            _db.child('lobby/$id').remove();
+            continue;
+          }
+
+          targetGameId = id;
+          break; // Found a fresh lobby
+        }
       }
+
+      if (targetGameId != null) {
+        final result = await _db.child('games/$targetGameId').runTransaction((Object? game) {
+          if (game == null) return Transaction.abort();
+          Map<String, dynamic> g = Map<String, dynamic>.from(game as Map);
+
+          if (g['status'] != 'waiting' || g['guest_id'] != null) {
+            return Transaction.abort();
+          }
+
+          g['status'] = 'playing';
+          g['guest_id'] = _myId;
+          g['guest_name'] = myHandle;
+          g['guest_avatar'] = myAvatar;
+          g['guest_chip_id'] = chipId ?? "default_red";
+          g['match_start_time'] = ServerValue.timestamp;
+
+          return Transaction.success(g);
+        });
+
+        if (result.committed) {
+          _gameId = targetGameId;
+          _playerRole = "guest";
+          await _saveCurrentGameSession(_gameId!, _playerRole!);
+          await _db.child('lobby').child(_gameId!).remove();
+          _listenToGame();
+          onMatchFound?.call();
+          return;
+        }
+      }
+
+      _gameId = _db.child('games').push().key;
+      _playerRole = "host";
+
+      final gameData = {
+        'status': 'waiting',
+        'created_at': ServerValue.timestamp, // For Lobby Expiration
+        'host_id': _myId,
+        'host_name': myHandle,
+        'host_avatar': myAvatar,
+        'host_chip_id': chipId ?? "default_blue",
+        'turn': 'host',
+        'board': List.filled(100, 0),
+      };
+
+      await _db.child('games/$_gameId').set(gameData);
+      await _db.child('lobby').child(_gameId!).set(_myId);
+
+      _db.child('games/$_gameId').onDisconnect().remove();
+      _db.child('lobby/$_gameId').onDisconnect().remove();
+
+      await _saveCurrentGameSession(_gameId!, _playerRole!);
       _listenToGame();
+
     } catch (e) {
       onGameError?.call("Matchmaking error: $e");
     }
@@ -258,10 +474,14 @@ class OnlineService {
     _gameSubscription = _db.child('games/$_gameId').onValue.listen((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
       if (data != null && onGameStateChanged != null) {
-        // Just pass the data to the GameBoard; let the UI handle its own state
+        if (data['status'] == 'playing') {
+          _db.child('games/$_gameId').onDisconnect().cancel();
+          _db.child('games/$_gameId/players/$_playerRole').onDisconnect().cancel();
+
+          _db.child('games/$_gameId/players/$_playerRole/status').onDisconnect().set('offline');
+        }
         onGameStateChanged!(Map<String, dynamic>.from(data));
 
-        // Handle sounds (KEEP this logic here)
         if (data['last_sound'] != null) {
           final soundData = data['last_sound'];
           final int? soundTime = soundData['time'];
@@ -283,19 +503,29 @@ class OnlineService {
   }
 
   Future<void> sendMove(int index, String card, int playerValue) async {
-    if (_gameId == null) return;
-    try {
-      await _db.child('games/$_gameId').update({
-        'board/$index': playerValue,
-        'last_move': {'card': card, 'index': index, 'player': _playerRole},
-        'turn': _playerRole == 'host' ? 'guest' : 'host',
-      });
-    } catch (e) {
-      print("Move error: $e");
-    }
+    if (_gameId == null || _playerRole == null) return;
+
+    final gameRef = _db.child('games/$_gameId');
+
+    await gameRef.runTransaction((Object? game) {
+      if (game == null) return Transaction.abort();
+      Map<String, dynamic> g = Map<String, dynamic>.from(game as Map);
+
+      if (g['turn'] != _playerRole || g['status'] != 'playing') {
+        return Transaction.abort();
+      }
+
+      // Apply the move
+      List<dynamic> board = List.from(g['board']);
+      board[index] = playerValue;
+      g['board'] = board;
+      g['last_move'] = {'card': card, 'index': index, 'player': _playerRole};
+      g['turn'] = (_playerRole == 'host') ? 'guest' : 'host';
+
+      return Transaction.success(g);
+    });
   }
 
-  // NEW: Notify opponent of a burned card
   Future<void> sendBurnAction(String card) async {
     if (_gameId == null) return;
     await _db.child('games/$_gameId/last_burn').set({
@@ -469,6 +699,7 @@ class OnlineService {
   }
 
   Future<void> leaveGame() async {
+    await _clearGameSession();
     if (_gameId != null && _playerRole != null) {
       // Explicitly set offline if leaving normally
       await _db.child('games/$_gameId/players/$_playerRole/status').set('offline');
@@ -496,76 +727,149 @@ class OnlineService {
 
   Future<void> findMultiplayerMatch({required int targetPlayers, required bool isTeam, String? chipId}) async {
     final prefs = await SharedPreferences.getInstance();
-    _myId = FirebaseAuth.instance.currentUser?.uid ?? "Guest_${Random().nextInt(999)}";
-
+    _myId = _auth.currentUser?.uid;
     String myName = prefs.getString('unique_handle') ?? "Player";
     String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
 
-    // Mode-specific lobby key
     final String modeKey = "${targetPlayers}_players_${isTeam ? "team" : "solo"}";
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final twoMinutesAgo = now - (2 * 60 * 1000);
 
     final snapshot = await _db.child('games')
         .orderByChild('config')
         .equalTo(modeKey)
         .get();
 
-    String? foundGameId;
-    int mySlot = 0;
-
     if (snapshot.exists) {
-      Map games = snapshot.value as Map;
+      final games = Map<dynamic, dynamic>.from(snapshot.value as Map);
       for (var id in games.keys) {
-        if (games[id]['status'] == 'waiting') {
-          foundGameId = id;
-          Map players = games[id]['players'] ?? {};
-          mySlot = players.length;
-          break;
+        final g = games[id];
+        final createdAt = g['created_at'] ?? 0;
+
+        if (g['status'] == 'waiting' && createdAt < twoMinutesAgo) {
+          _db.child('games/$id').remove();
+          continue;
         }
-      }
-    }
 
-    if (foundGameId != null) {
-      _gameId = foundGameId;
-      _playerRole = "player_$mySlot";
-      await _db.child('games/$_gameId/players/$_playerRole').set({
-        'id': _myId,
-        'name': myName,
-        'avatar': myAvatar,
-        'chip_id': chipId ?? "default_blue",
-      });
+        if (g['status'] == 'waiting') {
 
-      if (mySlot == targetPlayers - 1) {
-        // Lobby full, let's roll
-        await _db.child('games/$_gameId').update({'status': 'playing'});
-      }
-    } else {
-      _gameId = _db.child('games').push().key;
-      _playerRole = "player_0";
-      await _db.child('games/$_gameId').set({
-        'status': 'waiting',
-        'config': modeKey,
-        'player_count': targetPlayers,
-        'is_team': isTeam,
-        'turn_index': 0,
-        'board': List.filled(100, 0),
-        'players': {
-          'player_0': {
-            'id': _myId,
-            'name': myName,
-            'avatar': myAvatar,
-            'chip_id': chipId ?? "default_red",
+          final result = await _db.child('games/$id').runTransaction((Object? game) {
+            if (game == null) return Transaction.abort();
+            Map<String, dynamic> gData = Map<String, dynamic>.from(game as Map);
+
+            Map players = gData['players'] ?? {};
+            if (players.length >= targetPlayers || gData['status'] != 'waiting') {
+              return Transaction.abort();
+            }
+
+            int slotIndex = players.length;
+            String role = "player_$slotIndex";
+            players[role] = {
+              'id': _myId,
+              'name': myName,
+              'avatars': myAvatar,
+              'chip_id': chipId ?? "default_blue",
+              'status': 'online',
+            };
+
+            gData['players'] = players;
+            if (players.length == targetPlayers) {
+              gData['status'] = 'playing';
+            }
+
+            return Transaction.success(gData);
+          });
+
+          if (result.committed) {
+            _gameId = id;
+            // Determine our role from the transaction result
+            final updatedPlayers = (result.snapshot.value as Map)['players'] as Map;
+            _playerRole = updatedPlayers.entries.firstWhere((e) => e.value['id'] == _myId).key;
+
+            await _saveCurrentGameSession(_gameId!, _playerRole!);
+            _listenToGame();
+            return;
           }
         }
-      });
+      }
     }
+
+    // Create new multiplayer lobby
+    _gameId = _db.child('games').push().key;
+    _playerRole = "player_0";
+
+    await _db.child('games/$_gameId').set({
+      'status': 'waiting',
+      'created_at': ServerValue.timestamp,
+      'config': modeKey,
+      'player_count': targetPlayers,
+      'is_team': isTeam,
+      'turn_index': 0,
+      'board': List.filled(100, 0),
+      'players': {
+        'player_0': {
+          'id': _myId,
+          'name': myName,
+          'avatars': myAvatar,
+          'chip_id': chipId ?? "default_red",
+          'status': 'online',
+        }
+      }
+    });
+
+    // If host leaves before match starts, kill the lobby
+    _db.child('games/$_gameId').onDisconnect().remove();
+
+    await _saveCurrentGameSession(_gameId!, _playerRole!);
     _listenToGame();
   }
+
   Future<void> sendMultiplayerMove(int index, String card, int playerValue, int nextTurn) async {
-    if (_gameId == null) return;
-    await _db.child('games/$_gameId').update({
-      'board/$index': playerValue,
-      'last_move': {'card': card, 'index': index, 'player': _playerRole},
-      'turn_index': nextTurn,
+    if (_gameId == null || _playerRole == null) return;
+
+    final gameRef = _db.child('games/$_gameId');
+    int mySlotIndex = int.parse(_playerRole!.split('_').last);
+
+    await gameRef.runTransaction((Object? game) {
+      if (game == null) return Transaction.abort();
+      Map<String, dynamic> g = Map<String, dynamic>.from(game as Map);
+
+      // VALIDATION: Check the current turn_index against our slot
+      if (g['turn_index'] != mySlotIndex || g['status'] != 'playing') {
+        return Transaction.abort();
+      }
+
+      List<dynamic> board = List.from(g['board']);
+      board[index] = playerValue;
+      g['board'] = board;
+      g['last_move'] = {'card': card, 'index': index, 'player': _playerRole};
+      g['turn_index'] = nextTurn;
+
+      return Transaction.success(g);
+    });
+  }
+
+  void startNotificationListener() {
+    if (_myId == null) return;
+
+    _db.child('notifications/$_myId').onChildAdded.listen((event) {
+      if (event.snapshot.value == null) return;
+      final data = Map<String, dynamic>.from(event.snapshot.value as Map);
+
+      // If someone accepted your game
+      if (data['type'] == 'game_accept') {
+        // TRIGGER LOCAL NOTIFICATION HERE
+        // NotificationManager.show("Game Ready", "${data['from_name']} accepted your challenge! Come back!");
+
+        // Also remove the notification so it doesn't pop up again
+        event.snapshot.ref.remove();
+
+        // Auto-join the game
+        _gameId = data['game_id'];
+        _playerRole = 'host';
+        _listenToGame();
+        onMatchFound?.call(); // Triggers UI navigation
+      }
     });
   }
 

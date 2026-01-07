@@ -24,7 +24,7 @@ final List<AvatarItem> allAvatars = [
   const AvatarItem(id: "avatar_6", name: "King", color: Colors.amber, icon: Icons.emoji_events),
 ];
 
-// Helper to get avatar by ID
+// Helper to get avatars by ID
 AvatarItem getAvatarById(String? id) {
   return allAvatars.firstWhere((a) => a.id == id, orElse: () => allAvatars[0]);
 }

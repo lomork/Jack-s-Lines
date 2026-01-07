@@ -46,6 +46,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   String _avatarId = "avatar_1";
   String opponentFlag = "🤖";
   int totalCoins = 0;
+  bool _isOpponentOffline = false;
 
   List<String> deck = [];
   final List<String> playerHand = [];
@@ -433,11 +434,19 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     _onlineService!.onGameStateChanged = (data) {
       if (!mounted) return;
 
-      // SYNC PLAYER INFO
+      bool disconnected = false;
+      if (data['players'] != null) {
+        Map pMap = data['players'];
+        pMap.forEach((key, val) {
+          if (val['id'] != FirebaseAuth.instance.currentUser?.uid && val['status'] == 'offline') {
+            disconnected = true;
+          }
+        });
+      }
+
       if (data['players'] != null) {
         setState(() {
           Map pMap = data['players'];
-          // Sort keys (player_0, player_1) to ensure consistent ordering
           var sortedKeys = pMap.keys.toList()..sort();
           playersInfo = sortedKeys
               .map((k) => Map<String, dynamic>.from(pMap[k]))
@@ -474,6 +483,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
         setState(() {
           isLoading = false;
+          _isOpponentOffline = disconnected;
           currentTurnIndex = data['turn_index'] ?? 0;
 
           String myRole = _onlineService!.myRole;
@@ -1136,7 +1146,30 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                       ),
                     ),
                   if (isChatOpen) _buildChatOverlay(),
+
+                  if (_isOpponentOffline && !isGameOver)
+                    Container(
+                      color: Colors.black54,
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(color: Colors.orangeAccent),
+                            const SizedBox(height: 20),
+                            const Text(
+                              "OPPONENT RECONNECTING...",
+                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                            ),
+                            const Text(
+                              "Waiting for a stable connection",
+                              style: TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                 ],
+
               ),
             ),
           );
@@ -1401,7 +1434,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
               // Resolve Avatar Data
               String avatarId =
-                  p?['avatar'] ?? (index == 0 ? _avatarId : opponentAvatarId);
+                  p?['avatars'] ?? (index == 0 ? _avatarId : opponentAvatarId);
               AvatarItem avatar = allAvatars.firstWhere(
                 (a) => a.id == avatarId,
                 orElse: () => allAvatars[0],
@@ -1823,7 +1856,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                 AvatarItem? avatar;
                 if (isFilled) {
                   avatar = allAvatars.firstWhere(
-                    (a) => a.id == p!['avatar'],
+                    (a) => a.id == p!['avatars'],
                     orElse: () => allAvatars[0],
                   );
                 }

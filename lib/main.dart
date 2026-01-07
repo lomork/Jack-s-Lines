@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'database/online_service.dart';
 import 'screens/menu/menu_screen.dart';
 import 'screens/authorize/login_screen.dart';
 
@@ -37,7 +38,8 @@ class MyApp extends StatelessWidget {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasData) {
-            return const MenuScreen(); // User is logged in
+            OnlineService().setupPresence();
+            return const MenuScreen();
           }
           return const LoginScreen(); // User needs to login
         },

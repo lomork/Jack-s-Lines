@@ -109,16 +109,13 @@ class AuthService {
   // --- DATABASE SETUP ---
   Future<void> _initializeUserData(User user, {String? handle, bool isGuest = false}) async {
     final prefs = await SharedPreferences.getInstance();
-
-    // Generate Unique ID
+    bool isGuest = user.isAnonymous;
     String uniqueId = "#${Random().nextInt(900000) + 100000}";
-    // Logic: If handle is null, use Guest_ID. If Google gives a name, use it.
     String finalHandle = handle ?? (isGuest ? "Guest_${uniqueId.substring(1)}" : "Player");
 
     final snapshot = await _db.child('users/${user.uid}').get();
 
     if (!snapshot.exists) {
-      // Create new entry
       Map<String, dynamic> initialData = {
         'uid': user.uid,
         'handle': finalHandle,
@@ -138,7 +135,13 @@ class AuthService {
 
       await _db.child('users/${user.uid}').set(initialData);
 
-      // Save Local
+      await _db.child('public_profiles/${user.uid}').set({
+        'username': finalHandle, // Search refers to this as username
+        'username_lowercase': finalHandle.toLowerCase(),
+        'avatars': 'avatar_1',
+        'last_seen': ServerValue.timestamp,
+      });
+
       await prefs.setString('unique_handle', finalHandle);
       await prefs.setString('unique_id', uniqueId);
       await prefs.setInt('user_coins', 1000);
@@ -148,13 +151,25 @@ class AuthService {
   }
 
   Future<void> _syncCloudToLocal(String uid) async {
-    final snapshot = await _db.child('users/$uid').get();
+    final snapshot = await _db.child("users/$uid").get();
     if (snapshot.exists) {
-      final data = Map<String, dynamic>.from(snapshot.value as Map);
+      final Map<String, dynamic> data = Map<String, dynamic>.from(snapshot.value as Map);
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('unique_handle', data['handle']);
-      await prefs.setString('unique_id', data['unique_id']);
-      await prefs.setInt('user_coins', data['coins']);
+
+      String currentHandle = data["handle"] ?? "Player";
+      await prefs.setString("unique_handle", currentHandle);
+
+      // FIX: If the public profile is missing, create it now!
+      final profileSnap = await _db.child("public_profiles/$uid").get();
+      if (!profileSnap.exists) {
+        print("DEBUG: Backfilling missing public profile for $uid");
+        await _db.child("public_profiles/$uid").set({
+          "username": currentHandle,
+          "username_lowercase": currentHandle.toLowerCase(),
+          "avatars": data["avatars"] ?? "avatar_1",
+          "last_seen": ServerValue.timestamp,
+        });
+      }
     }
   }
 }
