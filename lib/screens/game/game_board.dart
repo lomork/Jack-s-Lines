@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui'; // Added for ImageFilter
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/cupertino.dart';
@@ -71,6 +72,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   bool isSuddenDeath = false;
   List<List<int>> winningSequences = [];
   late String currentAiDifficulty;
+
+  // New: Track who won to highlight their header
+  int? winningPlayerIndex;
 
   // Interaction
   String? selectedCard;
@@ -294,17 +298,27 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     int losses = prefs.getInt('total_losses') ?? 0;
     int totalMatches = prefs.getInt('total_matches') ?? 0;
     int currentXp = prefs.getInt('xp') ?? 0;
+    int currentCoins = prefs.getInt('total_coins') ?? 0;
 
     int xpGain = won ? 20 : 5;
+
+    // Logic: Increase streak, coins, and wins
     if (won) {
       wins += 1;
       currentXp += xpGain;
+      currentCoins += 100; // Reward for winning
       await prefs.setInt('total_wins', wins);
+      await prefs.setInt('total_coins', currentCoins);
+      await prefs.setInt(
+        'user_coins',
+        currentCoins,
+      ); // Sync key for OnlineService
     } else {
       losses += 1;
       currentXp += xpGain;
       await prefs.setInt('total_losses', losses);
     }
+
     totalMatches += 1;
     await prefs.setInt('total_matches', totalMatches);
     await prefs.setInt('xp', currentXp);
@@ -315,21 +329,29 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           .ref()
           .child('users')
           .child(user.uid);
+
+      // Update stats and coins on Firebase
       await dbRef.update({
         'total_wins': wins,
         'total_losses': losses,
         'total_matches': totalMatches,
         'xp': currentXp,
+        'coins': currentCoins, // Update coins remotely
       });
+
       dbRef.child('matches').push().set({
         'result': won ? 'win' : 'loss',
         'mode': widget.isOnline ? 'Online' : 'Offline',
         'xp_gain': xpGain,
+        'coins_gained': won ? 100 : 0,
         'timestamp': ServerValue.timestamp,
         'opponent_name': opponentName,
         'board_snapshot': boardState.join(','),
       });
     }
+
+    // Update local state to reflect new coins immediately
+    if (mounted) setState(() => totalCoins = currentCoins);
   }
 
   void _startTurnTimer() {
@@ -391,10 +413,28 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   void _handleTimeout() {
     _turnTimer?.cancel();
     if (isGameOver) return;
+
+    // If time runs out, current player loses.
+    // In Offline: If Player (Index 0) times out -> Winner is AI (Index 1)
+    // In Online: If I time out -> Winner is Opponent
+
     bool iLost = isPlayerTurn;
-    isGameOver = true;
+    // If I lost, the winner is someone else.
+    // Simplified: Just record result. For visual header we need index.
+    // If I am P1 (Index 0) and I lose, Winner is Index 1.
+    int mySlot = 0;
+    if (widget.isOnline) {
+      mySlot = int.parse(_onlineService?.myRole.split('_').last ?? "0");
+    }
+    int winnerIdx = iLost ? (mySlot == 0 ? 1 : 0) : mySlot;
+
+    setState(() {
+      isGameOver = true;
+      winningPlayerIndex = winnerIdx;
+    });
+
     _recordGameResult(won: !iLost);
-    _showGameOverDialog(!iLost, isTimeout: true);
+    // Don't show dialog, show blur exit
   }
 
   void _handleExit() {
@@ -403,7 +443,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF2C2C2C),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text("QUIT MATCH?", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        title: const Text(
+          "QUIT MATCH?",
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
         content: const Text(
           "Abandoning this match will count as an immediate LOSS and reset your streak. Are you sure?",
           style: TextStyle(color: Colors.white70, fontSize: 13),
@@ -411,17 +454,26 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text("STAY", style: TextStyle(color: Colors.cyanAccent)),
+            child: const Text(
+              "STAY",
+              style: TextStyle(color: Colors.cyanAccent),
+            ),
           ),
           TextButton(
             onPressed: () {
               Navigator.pop(context); // Step 1: Close Dialog
               _recordGameResult(won: false);
               _onlineService?.sendForfeit(); // Step 2: Notify others
-              _onlineService?.leaveGame();   // Step 3: Cleanup
-              Navigator.pop(context);        // Step 4: Return to Menu
+              _onlineService?.leaveGame(); // Step 3: Cleanup
+              Navigator.pop(context); // Step 4: Return to Menu
             },
-            child: const Text("ABANDON", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold)),
+            child: const Text(
+              "ABANDON",
+              style: TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
         ],
       ),
@@ -438,7 +490,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       if (data['players'] != null) {
         Map pMap = data['players'];
         pMap.forEach((key, val) {
-          if (val['id'] != FirebaseAuth.instance.currentUser?.uid && val['status'] == 'offline') {
+          if (val['id'] != FirebaseAuth.instance.currentUser?.uid &&
+              val['status'] == 'offline') {
             disconnected = true;
           }
         });
@@ -456,9 +509,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       // Monitor for other players going offline during the match
       if (data['status'] == 'playing' && !isGameOver) {
         for (var p in playersInfo) {
-          if (p['id'] != FirebaseAuth.instance.currentUser?.uid && p['status'] == 'offline') {
+          if (p['id'] != FirebaseAuth.instance.currentUser?.uid &&
+              p['status'] == 'offline') {
             // If an opponent goes offline, wait 5 seconds before declaring forfeit
-            // (to account for brief network blips)
             Future.delayed(const Duration(seconds: 5), () {
               if (mounted) _checkAndForfeit();
             });
@@ -478,7 +531,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           _avatarReactionController.forward().then(
             (_) => _avatarReactionController.reverse(),
           );
-          //_onlineService!.setupPresence(_onlineService!.currentGameId!, _onlineService!.myRole);
         }
 
         setState(() {
@@ -513,10 +565,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
       // Handle Forfeit
       if (data['status'] == 'forfeit' && !isGameOver) {
-        isGameOver = true;
-        _turnTimer?.cancel();
-        _recordGameResult(won: true);
-        _showOpponentLeftDialog();
+        _triggerVictoryByForfeit();
       }
     };
 
@@ -532,12 +581,23 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   void _triggerVictoryByForfeit() {
+    if (isGameOver) return;
+
+    // I win if they forfeit
+    int mySlot = 0;
+    if (widget.isOnline) {
+      mySlot = int.parse(_onlineService?.myRole.split('_').last ?? "0");
+    }
+
     setState(() {
       isGameOver = true;
+      winningPlayerIndex = mySlot; // I am the winner
       _turnTimer?.cancel();
     });
+
     _recordGameResult(won: true);
-    _showOpponentLeftDialog();
+    _confettiController.play();
+    SoundManager.play('win');
   }
 
   void _checkAndForfeit() {
@@ -546,7 +606,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     // Check if any opponent is offline
     bool opponentGone = false;
     for (var p in playersInfo) {
-      if (p['id'] != FirebaseAuth.instance.currentUser?.uid && p['status'] == 'offline') {
+      if (p['id'] != FirebaseAuth.instance.currentUser?.uid &&
+          p['status'] == 'offline') {
         opponentGone = true;
         break;
       }
@@ -654,7 +715,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     Navigator.pop(context);
   }
 
-  // Update _onBoardTap in lib/screens/game/game_board.dart
   void _onBoardTap(int index) {
     int mySlotIndex = int.parse(_onlineService?.myRole.split('_').last ?? "0");
 
@@ -875,14 +935,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   void checkForWin() {
-    // 1v1v1 needs 1 sequence. 1v1 and 2v2 need 2 sequences.
     int winTarget = (widget.playerCount == 3) ? 1 : 2;
-
-    // Track sequences for each chip value (1, 2, or 3)
     Map<int, int> teamSequences = {1: 0, 2: 0, 3: 0};
     List<List<int>> potential = [];
 
-    // Standard grid check (Rows, Cols, Diagonals)
     for (int i = 0; i < 100; i++) {
       if (i % 10 <= 5) _checkLine(i, 1, potential);
       if (i < 60) _checkLine(i, 10, potential);
@@ -891,9 +947,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     }
 
     winningSequences.clear();
-    // Simplified multiplayer sequence tracking
+
     for (var seq in potential) {
-      // Find owner of the first non-corner chip in the line
       int firstChipIdx = seq.firstWhere(
         (idx) => !cornerIndices.contains(idx),
         orElse: () => -1,
@@ -903,13 +958,44 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       int ownerValue = boardState[firstChipIdx];
       if (ownerValue == 0) continue;
 
-      teamSequences[ownerValue] = (teamSequences[ownerValue] ?? 0) + 1;
+      // Fix for overlapping sequences
+      bool isDistinct = true;
+      for (var existingSeq in winningSequences) {
+        int sharedCount = 0;
+        for (int idx in seq) {
+          if (existingSeq.contains(idx)) {
+            sharedCount++;
+          }
+        }
+        if (sharedCount > 1) {
+          isDistinct = false;
+          break;
+        }
+      }
 
-      if (teamSequences[ownerValue]! >= winTarget) {
-        _triggerVictory(ownerValue);
-        return;
+      if (isDistinct) {
+        winningSequences.add(seq);
+        teamSequences[ownerValue] = (teamSequences[ownerValue] ?? 0) + 1;
       }
     }
+
+    teamSequences.forEach((owner, count) {
+      if (count >= winTarget && !isGameOver) {
+        _triggerVictory(owner);
+      }
+    });
+  }
+
+  int _getWinnerIndex(int winnerValue) {
+    if (!widget.isOnline) {
+      // Offline: 0 is Player (Val 1), 1 is Bot (Val 2)
+      return (winnerValue == 1) ? 0 : 1;
+    }
+    // Online: Iterate slots to find who holds this chip value
+    for (int i = 0; i < widget.playerCount; i++) {
+      if (_getPlayerChipValue(i) == winnerValue) return i;
+    }
+    return 0; // Fallback
   }
 
   void _triggerVictory(int winnerValue) {
@@ -918,9 +1004,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     setState(() {
       isGameOver = true;
       _turnTimer?.cancel();
+      winningPlayerIndex = _getWinnerIndex(winnerValue);
     });
 
-    // Determine if the local player won based on their chip value
     bool iWon = (myPlayerValue == winnerValue);
 
     if (iWon) {
@@ -931,7 +1017,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     }
 
     _recordGameResult(won: iWon);
-    _showGameOverDialog(iWon);
+    // Dialog removed. Confetti and Blur/Exit button handle the end state.
   }
 
   void _checkLine(int start, int step, List<List<int>> target) {
@@ -952,59 +1038,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       curr.add(idx);
     }
     target.add(curr);
-  }
-
-  void _showOpponentLeftDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2C2C2C),
-        title: const Text(
-          "VICTORY!",
-          style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold),
-        ),
-        content: const Text(
-          "Opponent left. Win by forfeit!",
-          style: TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
-            },
-            child: const Text("EXIT"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showGameOverDialog(bool iWon, {bool isTimeout = false}) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF2C2C2C),
-        title: Text(
-          iWon ? "VICTORY!" : (isTimeout ? "TIME'S UP!" : "DEFEAT"),
-          style: TextStyle(
-            color: iWon ? Colors.amber : Colors.red,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
-            },
-            child: const Text("EXIT"),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
@@ -1075,22 +1108,123 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                     top: 10,
                     left: 10,
                     child: IconButton(
-                      icon: const Icon(Icons.logout, color: Colors.white54, size: 20),
+                      icon: const Icon(
+                        Icons.logout,
+                        color: Colors.white54,
+                        size: 20,
+                      ),
                       onPressed: _handleExit,
                     ),
                   ),
+
+                  // Fanned Hand Area with Blur Overlay if Game Over
                   Positioned(
                     bottom: 0,
                     left: 0,
                     right: 0,
                     height: screenH * 0.22,
-                    child: GestureDetector(
-                      onPanUpdate: (details) =>
-                          setState(() => hoverPosition = details.localPosition),
-                      onPanEnd: (_) => setState(() => hoverPosition = null),
-                      child: _buildFannedHand(),
+                    child: Stack(
+                      children: [
+                        GestureDetector(
+                          onPanUpdate: (details) => setState(
+                            () => hoverPosition = details.localPosition,
+                          ),
+                          onPanEnd: (_) => setState(() => hoverPosition = null),
+                          child: _buildFannedHand(),
+                        ),
+
+                        // NEW: Blur Overlay and Exit Button on Game Over
+                        if (isGameOver)
+                          Positioned.fill(
+                            child: ClipRect(
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+                                child: Container(
+                                  color: Colors.black.withOpacity(0.4),
+                                  alignment: Alignment.center,
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        (winningPlayerIndex != null &&
+                                                ((!widget.isOnline &&
+                                                        winningPlayerIndex ==
+                                                            0) ||
+                                                    (widget.isOnline &&
+                                                        winningPlayerIndex ==
+                                                            int.parse(
+                                                              _onlineService
+                                                                      ?.myRole
+                                                                      .split(
+                                                                        '_',
+                                                                      )
+                                                                      .last ??
+                                                                  "0",
+                                                            ))))
+                                            ? "VICTORY!"
+                                            : "DEFEAT",
+                                        style: TextStyle(
+                                          color:
+                                              (winningPlayerIndex != null &&
+                                                  ((!widget.isOnline &&
+                                                          winningPlayerIndex ==
+                                                              0) ||
+                                                      (widget.isOnline &&
+                                                          winningPlayerIndex ==
+                                                              int.parse(
+                                                                _onlineService
+                                                                        ?.myRole
+                                                                        .split(
+                                                                          '_',
+                                                                        )
+                                                                        .last ??
+                                                                    "0",
+                                                              ))))
+                                              ? Colors.amber
+                                              : Colors.redAccent,
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 2,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 16),
+                                      ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.white,
+                                          foregroundColor: Colors.black,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 32,
+                                            vertical: 12,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              20,
+                                            ),
+                                          ),
+                                        ),
+                                        onPressed: () {
+                                          Navigator.pop(
+                                            context,
+                                          ); // Go back to Menu
+                                          _onlineService?.leaveGame();
+                                        },
+                                        child: const Text(
+                                          "EXIT MATCH",
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
+
                   Positioned(
                     right: 20,
                     bottom: screenH * 0.12,
@@ -1154,22 +1288,30 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const CircularProgressIndicator(color: Colors.orangeAccent),
+                            const CircularProgressIndicator(
+                              color: Colors.orangeAccent,
+                            ),
                             const SizedBox(height: 20),
                             const Text(
                               "OPPONENT RECONNECTING...",
-                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.5,
+                              ),
                             ),
                             const Text(
                               "Waiting for a stable connection",
-                              style: TextStyle(color: Colors.white70, fontSize: 12),
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
                             ),
                           ],
                         ),
                       ),
                     ),
                 ],
-
               ),
             ),
           );
@@ -1179,7 +1321,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Widget _buildSoundBoardOverlay() {
-
     final Map<String, String> friendlyNames = {
       "comment1.mp3": "Bruh!",
       "comment2.mp3": "Fuck",
@@ -1204,10 +1345,14 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         padding: const EdgeInsets.all(10),
         itemCount: soundBoardFiles.length,
         separatorBuilder: (c, i) =>
-            const Divider(color: Colors.white10, height: 1),
+        const Divider(color: Colors.white10, height: 1),
         itemBuilder: (c, i) {
           String fileName = soundBoardFiles[i];
-          String displayName = friendlyNames[fileName] ?? fileName.split('.').first.toUpperCase();
+
+          // 1. Determine the name to show
+          String displayName = friendlyNames[fileName] ??
+              fileName.split('.').first.toUpperCase();
+
           return GestureDetector(
             onTap: () {
               setState(() {
@@ -1223,7 +1368,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                fileName.toUpperCase(),
+                // 2. FIX: Use 'displayName' here, not 'fileName'
+                displayName,
                 style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 10,
@@ -1430,6 +1576,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           Row(
             children: List.generate(displayCount, (index) {
               bool isCurrent = (currentTurnIndex == index);
+              // NEW: Check if this player is the winner
+              bool isWinner = isGameOver && (index == winningPlayerIndex);
+
               var p = playersInfo.length > index ? playersInfo[index] : null;
 
               // Resolve Avatar Data
@@ -1443,79 +1592,138 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
               bool isOffline = p?['status'] == 'offline';
               Color statusColor = isOffline ? Colors.red : Colors.greenAccent;
 
-              String displayName = p?['name'] ?? (index == 0 ? _myHandle : opponentName);
+              String displayName =
+                  p?['name'] ?? (index == 0 ? _myHandle : opponentName);
 
               return Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (isCurrent)
-                      Text(
-                        "$_turnTimeRemaining",
-                        style: TextStyle(
-                          color: indicatorColor,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 10,
-                        ),
-                      ),
-
-                    // AVATAR PULSE & CONNECTION STATUS
-                    Stack(
-                      alignment: Alignment.bottomRight,
-                      children: [
-                        // IDEA 1: Avatar Pulse using TweenAnimationBuilder
-                        TweenAnimationBuilder<double>(
-                          tween: Tween<double>(
-                            begin: 1.0,
-                            end: isCurrent ? 1.2 : 1.0,
+                child: Container(
+                  // NEW: Green glow for the winner's slot
+                  decoration: isWinner
+                      ? BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.greenAccent.withOpacity(0.1),
+                              Colors.transparent,
+                            ],
                           ),
-                          duration: const Duration(milliseconds: 500),
-                          builder: (context, scale, child) {
-                            return Transform.scale(
-                              scale: scale,
-                              child: CircleAvatar(
-                                radius: 14,
-                                backgroundColor: avatar.color.withOpacity(0.2),
-                                child: Icon(
-                                  avatar.icon,
-                                  size: 16,
-                                  color: avatar.color,
-                                ),
-                              ),
-                            );
-                          },
+                        )
+                      : null,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // Confetti specifically for the winner
+                      if (isWinner)
+                        ConfettiWidget(
+                          confettiController: _confettiController,
+                          blastDirection: pi / 2, // Down
+                          emissionFrequency: 0.05,
+                          numberOfParticles: 20,
+                          gravity: 0.2,
                         ),
 
-                        // IDEA 2: Connection Status Dot
-                        if (widget.isOnline)
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: statusColor,
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: const Color(0xFF252525),
-                                width: 1.5,
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (isCurrent)
+                            Text(
+                              "$_turnTimeRemaining",
+                              style: TextStyle(
+                                color: indicatorColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 10,
                               ),
                             ),
-                          ),
-                      ],
-                    ),
 
-                    const SizedBox(height: 2),
-                    Text(
-                      displayName,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: isCurrent ? Colors.white : Colors.white38,
-                        fontWeight: isCurrent
-                            ? FontWeight.bold
-                            : FontWeight.normal,
+                          // AVATAR PULSE & CONNECTION STATUS
+                          Stack(
+                            alignment: Alignment.bottomRight,
+                            children: [
+                              // IDEA 1: Avatar Pulse using TweenAnimationBuilder
+                              TweenAnimationBuilder<double>(
+                                tween: Tween<double>(
+                                  begin: 1.0,
+                                  end: isCurrent ? 1.2 : 1.0,
+                                ),
+                                duration: const Duration(milliseconds: 500),
+                                builder: (context, scale, child) {
+                                  return Transform.scale(
+                                    scale: scale,
+                                    child: Container(
+                                      decoration: isWinner
+                                          ? BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              boxShadow: const [
+                                                BoxShadow(
+                                                  color: Colors.greenAccent,
+                                                  blurRadius: 20,
+                                                  spreadRadius: 2,
+                                                ),
+                                              ],
+                                            )
+                                          : null,
+                                      child: CircleAvatar(
+                                        radius: 14,
+                                        backgroundColor: avatar.color
+                                            .withOpacity(0.2),
+                                        child: ClipOval(
+                                          child: Image.asset(
+                                            avatar.assetPath,
+                                            width: 28,
+                                            height: 28,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+
+                              // IDEA 2: Connection Status Dot
+                              if (widget.isOnline)
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: statusColor,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: const Color(0xFF252525),
+                                      width: 1.5,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 2),
+                          Text(
+                            displayName,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: isWinner
+                                  ? Colors.greenAccent
+                                  : (isCurrent ? Colors.white : Colors.white38),
+                              fontWeight: isWinner || isCurrent
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                              shadows: isWinner
+                                  ? [
+                                      const Shadow(
+                                        color: Colors.greenAccent,
+                                        blurRadius: 10,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               );
             }),
@@ -1726,22 +1934,27 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   Widget _buildChipWidget(GameChip chip, {int? lastIndex}) {
     bool isShim = shimmeringIndices.contains(lastIndex);
+    // UI FIX: Check if this chip is part of a sequence
+    bool isLocked = lastIndex != null && _isChipLocked(lastIndex);
+
     return Container(
       width: 24,
       height: 24,
       decoration: BoxDecoration(
         color: chip.color,
         shape: BoxShape.circle,
-        border:
-            (lastPlacedChipIndex != null && lastPlacedChipIndex == lastIndex)
+        // UI FIX: Golden border for locked chips
+        border: isLocked
+            ? Border.all(color: Colors.amber, width: 3.0)
+            : (lastPlacedChipIndex != null && lastPlacedChipIndex == lastIndex)
             ? Border.all(color: Colors.white, width: 2)
             : Border.all(color: Colors.black12, width: 1),
         boxShadow: [
-          if (isShim)
-            const BoxShadow(
-              color: Colors.amberAccent,
+          if (isShim || isLocked) // Add glow for locked chips too
+            BoxShadow(
+              color: Colors.amberAccent.withOpacity(isLocked ? 0.5 : 1.0),
               blurRadius: 12,
-              spreadRadius: 4,
+              spreadRadius: isLocked ? 2 : 4,
             ),
           const BoxShadow(
             color: Colors.black45,
@@ -1754,7 +1967,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         child: Icon(
           chip.icon,
           size: 16,
-          color: isShim ? Colors.amber : Colors.white,
+          color: (isShim || isLocked) ? Colors.amber : Colors.white,
         ),
       ),
     );
@@ -1884,15 +2097,23 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
                                   ? (avatar?.color.withOpacity(0.1))
                                   : Colors.black26,
                             ),
-                          ),
-                          if (isFilled)
-                            Icon(avatar!.icon, size: 35, color: avatar.color)
-                          else
-                            const Icon(
+                            // UPDATED
+                            child: isFilled
+                                ? Padding(
+                              padding: const EdgeInsets.all(6.0),
+                              child: ClipOval(
+                                child: Image.asset(
+                                  avatar!.assetPath,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                            )
+                                : const Icon(
                               Icons.person_outline,
                               size: 30,
                               color: Colors.white10,
                             ),
+                          )
                         ],
                       ),
                       const SizedBox(height: 10),

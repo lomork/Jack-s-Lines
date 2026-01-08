@@ -275,7 +275,15 @@ class _AccountScreenState extends State<AccountScreen> with TickerProviderStateM
               CircleAvatar(
                 radius: 75,
                 backgroundColor: avatar.color,
-                child: Icon(avatar.icon, size: 85, color: Colors.white),
+                child: ClipOval(
+                  child: Image.asset(
+                    avatar.assetPath,
+                    width: 140,
+                    height: 140,
+                    fit: BoxFit.cover,
+                    errorBuilder: (c, o, s) => Icon(Icons.person, size: 85, color: Colors.white),
+                  ),
+                ),
               ),
               Positioned(
                 bottom: 5, right: 5,

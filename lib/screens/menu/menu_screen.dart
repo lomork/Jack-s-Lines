@@ -333,7 +333,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
                                 child: CircleAvatar(
                                   radius: 27,
                                   backgroundColor: currentAvatar.color,
-                                  child: Icon(currentAvatar.icon, size: 24, color: Colors.white),
+                                  child: ClipOval(
+                                    child: Image.asset(
+                                      currentAvatar.assetPath,
+                                      width: 48,
+                                      height: 48,
+                                      fit: BoxFit.cover,
+                                    ),
+                                  ),
                                 ),
                             ),
                             const SizedBox(height: 4),

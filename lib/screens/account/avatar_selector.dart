@@ -78,7 +78,16 @@ class _AvatarSelectorScreenState extends State<AvatarSelectorScreen> {
                   CircleAvatar(
                     radius: 40,
                     backgroundColor: avatar.color,
-                    child: Icon(avatar.icon, size: 40, color: Colors.white),
+                    child: Padding(
+                      padding: const EdgeInsets.all(4.0),
+                      child: Image.asset(
+                        avatar.assetPath,
+                        width: 60,
+                        height: 60,
+                        fit: BoxFit.contain,
+                        errorBuilder: (c, o, s) => const Icon(Icons.error, color: Colors.white),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 10),
                   Text(

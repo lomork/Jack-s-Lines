@@ -3,25 +3,56 @@ import 'package:flutter/material.dart';
 class AvatarItem {
   final String id;
   final String name;
-  final Color color;
-  final IconData icon; // Replace with 'String assetPath' if using images
+  final Color color; // Keep color for borders/glows
+  final String assetPath; // CHANGED: Replaced IconData with assetPath
 
   const AvatarItem({
     required this.id,
     required this.name,
     required this.color,
-    required this.icon,
+    required this.assetPath,
   });
 }
 
 // --- THE LIST OF AVATARS ---
+// Ensure you have these files in your assets/avatars/ folder
 final List<AvatarItem> allAvatars = [
-  const AvatarItem(id: "avatar_1", name: "Rookie", color: Colors.blue, icon: Icons.face),
-  const AvatarItem(id: "avatar_2", name: "Speedster", color: Colors.red, icon: Icons.directions_run),
-  const AvatarItem(id: "avatar_3", name: "Tank", color: Colors.green, icon: Icons.shield),
-  const AvatarItem(id: "avatar_4", name: "Mage", color: Colors.purple, icon: Icons.auto_fix_high),
-  const AvatarItem(id: "avatar_5", name: "Ninja", color: Colors.black, icon: Icons.visibility_off),
-  const AvatarItem(id: "avatar_6", name: "King", color: Colors.amber, icon: Icons.emoji_events),
+  const AvatarItem(
+      id: "avatar_1",
+      name: "Adventurer",
+      color: Colors.blue,
+      assetPath: "assets/avatars/avatar_1.png"
+  ),
+  const AvatarItem(
+      id: "avatar_2",
+      name: "Zombie",
+      color: Colors.red,
+      assetPath: "assets/avatars/avatar_2.png"
+  ),
+  const AvatarItem(
+      id: "avatar_3",
+      name: "Female",
+      color: Colors.green,
+      assetPath: "assets/avatars/avatar_3.png"
+  ),
+  const AvatarItem(
+      id: "avatar_4",
+      name: "Player",
+      color: Colors.purple,
+      assetPath: "assets/avatars/avatar_4.png"
+  ),
+  const AvatarItem(
+      id: "avatar_5",
+      name: "Soldier",
+      color: Colors.black,
+      assetPath: "assets/avatars/avatar_5.png"
+  ),
+  const AvatarItem(
+      id: "avatar_6",
+      name: "King",
+      color: Colors.amber,
+      assetPath: "assets/avatars/avatar_6.png"
+  ),
 ];
 
 // Helper to get avatars by ID
