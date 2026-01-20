@@ -137,6 +137,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     )..repeat();
     _loadUserData();
     _listenForUpdates();
+    _syncUserData();
   }
 
   @override
@@ -481,6 +482,61 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         ),
       ),
     );
+  }
+
+  Future<void> _syncUserData() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final dbRef = FirebaseDatabase.instance.ref().child('users').child(user.uid);
+
+    try {
+      final snapshot = await dbRef.get();
+      if (snapshot.exists) {
+        final cloudData = Map<String, dynamic>.from(snapshot.value as Map);
+
+        // 1. Fetch Values
+        int cloudCoins = cloudData['coins'] ?? 0;
+        int localCoins = prefs.getInt('total_coins') ?? 0; // or 'user_coins'
+
+        int cloudStreak = cloudData['streak'] ?? 0;
+        int localStreak = prefs.getInt('streak') ?? 0;
+
+        int cloudHearts = cloudData['heart_count'] ?? 5;
+        int localHearts = prefs.getInt('heart_count') ?? 5;
+
+        // 2. Conflict Resolution
+        // Coins & Streak: Accept HIGHEST (Prevent loss of progress)
+        int finalCoins = (cloudCoins > localCoins) ? cloudCoins : localCoins;
+        int finalStreak = (cloudStreak > localStreak) ? cloudStreak : localStreak;
+
+        // Lives: Accept LOWEST (Prevent cheating by clearing data)
+        int finalHearts = (cloudHearts < localHearts) ? cloudHearts : localHearts;
+
+        // 3. Update Local Storage
+        await prefs.setInt('total_coins', finalCoins);
+        await prefs.setInt('user_coins', finalCoins);
+        await prefs.setInt('streak', finalStreak);
+        await prefs.setInt('heart_count', finalHearts);
+
+        // 4. Update Cloud (to ensure consistency everywhere)
+        await dbRef.update({
+          'coins': finalCoins,
+          'streak': finalStreak,
+          'heart_count': finalHearts,
+        });
+
+        // 5. Refresh UI
+        if (mounted) {
+          setState(() {
+            _loadUserData(); // Reload the UI with the final values
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint("Sync Error: $e");
+    }
   }
 }
 

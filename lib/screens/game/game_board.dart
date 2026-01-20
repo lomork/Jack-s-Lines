@@ -48,6 +48,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   String opponentFlag = "🤖";
   int totalCoins = 0;
   bool _isOpponentOffline = false;
+  bool _lifeConsumed = false;
 
   List<String> deck = [];
   List<String> discardPile = [];
@@ -156,7 +157,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     currentAiDifficulty = widget.difficulty;
     _loadMyChip();
     _loadManualBoard();
-    _consumeLife();
 
     _textPulseController = AnimationController(
       vsync: this,
@@ -282,16 +282,25 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Future<void> _consumeLife() async {
+    if (_lifeConsumed) return; // Ensure we only take 1 life per game session
+
     final prefs = await SharedPreferences.getInstance();
     int currentHearts = prefs.getInt('heart_count') ?? 5;
+
     if (currentHearts > 0) {
       int newHearts = currentHearts - 1;
       await prefs.setInt('heart_count', newHearts);
+
+      setState(() {
+        _lifeConsumed = true; // Mark as consumed
+      });
+
       final user = FirebaseAuth.instance.currentUser;
-      if (user != null)
+      if (user != null) {
         FirebaseDatabase.instance.ref().child('users').child(user.uid).update({
           'heart_count': newHearts,
         });
+      }
     }
   }
 
@@ -302,58 +311,66 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     int totalMatches = prefs.getInt('total_matches') ?? 0;
     int currentXp = prefs.getInt('xp') ?? 0;
     int currentCoins = prefs.getInt('total_coins') ?? 0;
+    int currentStreak = prefs.getInt('streak') ?? 0;
 
     int xpGain = won ? 20 : 5;
+    int coinsEarned = 0;
 
-    // Logic: Increase streak, coins, and wins
     if (won) {
       wins += 1;
-      currentXp += xpGain;
-      currentCoins += 100; // Reward for winning
-      await prefs.setInt('total_wins', wins);
-      await prefs.setInt('total_coins', currentCoins);
-      await prefs.setInt(
-        'user_coins',
-        currentCoins,
-      ); // Sync key for OnlineService
+      currentStreak += 1; // Streak increases
+
+      // Coin Logic:
+      // Base (Participate) 100 + Win 100 = 200.
+      // If Streak > 3: 500 total.
+      if (currentStreak > 3) {
+        coinsEarned = 500;
+      } else {
+        coinsEarned = 200;
+      }
     } else {
       losses += 1;
-      currentXp += xpGain;
-      await prefs.setInt('total_losses', losses);
+      currentStreak = 0; // Streak resets on loss
+      coinsEarned = 50; // Loss gives 50 total
     }
 
+    currentCoins += coinsEarned;
+    currentXp += xpGain;
     totalMatches += 1;
+
+    // Save Local
+    await prefs.setInt('total_wins', wins);
+    await prefs.setInt('total_losses', losses);
     await prefs.setInt('total_matches', totalMatches);
     await prefs.setInt('xp', currentXp);
+    await prefs.setInt('total_coins', currentCoins);
+    await prefs.setInt('user_coins', currentCoins);
+    await prefs.setInt('streak', currentStreak);
 
+    // Save Cloud
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
-      final dbRef = FirebaseDatabase.instance
-          .ref()
-          .child('users')
-          .child(user.uid);
+      final dbRef = FirebaseDatabase.instance.ref().child('users').child(user.uid);
 
-      // Update stats and coins on Firebase
       await dbRef.update({
         'total_wins': wins,
         'total_losses': losses,
         'total_matches': totalMatches,
         'xp': currentXp,
-        'coins': currentCoins, // Update coins remotely
+        'coins': currentCoins,
+        'streak': currentStreak,
       });
 
       dbRef.child('matches').push().set({
         'result': won ? 'win' : 'loss',
         'mode': widget.isOnline ? 'Online' : 'Offline',
         'xp_gain': xpGain,
-        'coins_gained': won ? 100 : 0,
+        'coins_gained': coinsEarned,
         'timestamp': ServerValue.timestamp,
         'opponent_name': opponentName,
-        'board_snapshot': boardState.join(','),
       });
     }
 
-    // Update local state to reflect new coins immediately
     if (mounted) setState(() => totalCoins = currentCoins);
   }
 
@@ -523,8 +540,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         int ts = sfx['timestamp'] ?? 0;
         String file = sfx['file'] ?? "";
 
-        // Only play if this is a NEW sound (timestamp is newer than what we've seen)
-        // and we aren't the one who just played it (optional, but prevents double audio if you play locally too)
         if (ts > _lastSfxTimestamp && file.isNotEmpty) {
           _lastSfxTimestamp = ts;
           // Play the sound!
@@ -563,8 +578,14 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
       // 2. HANDLE MATCH START
       if (data['status'] == 'playing') {
+
+        bool isFriendMatch = data['is_private'] == true;
+        if (!isFriendMatch && !_lifeConsumed) {
+          _consumeLife();
+        }
+
         if (isLoading) {
-          SoundManager.play('card_shuffle');
+          SoundManager.play('card_shuffle.mp3');
           _avatarReactionController.forward().then(
             (_) => _avatarReactionController.reverse(),
           );
@@ -582,8 +603,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
             _lastTurnIndex = newTurnIndex;
             _startTurnTimer(); // Reset timer only on new turn
           }
-
-          //currentTurnIndex = data['turn_index'] ?? 0;
 
           String myRole = _onlineService!.myRole;
           int mySlotIndex = int.parse(myRole.split('_').last);
@@ -604,6 +623,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           _stopSearchAnimation();
           //_startTurnTimer();
           checkForWin();
+          _checkForDeadCards(allHands.isNotEmpty ? allHands[mySlotIndex] : playerHand);
         });
 
         if (allHands.isEmpty) _dealInitialHands();
@@ -644,7 +664,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
     _recordGameResult(won: true);
     _confettiController.play();
-    SoundManager.play('win');
+    SoundManager.play('win.mp3');
   }
 
   void _checkAndForfeit() {
@@ -730,6 +750,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   void _startOfflineGame() {
+    _consumeLife();
     _dealInitialHands();
     setState(() {
       isLoading = false;
