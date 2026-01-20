@@ -154,8 +154,9 @@ class _RequestsTabState extends State<RequestsTab> {
                 icon: const Icon(Icons.check_circle, color: Colors.greenAccent),
                 onPressed: () async {
                   await _onlineService.acceptFriendRequest(uid);
-                  if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("You and $name are now friends!")));
-                },
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("You and $name are now friends!")));
+                  }                },
               ),
               IconButton(
                 icon: const Icon(Icons.cancel, color: Colors.redAccent),

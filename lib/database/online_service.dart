@@ -500,6 +500,44 @@ class OnlineService {
 
   // --- MATCHMAKING & GAMEPLAY ---
 
+  Future<List<Map<String, dynamic>>> getUserMatchHistory() async {
+    final user = _auth.currentUser;
+    if (user == null) return [];
+
+    try {
+      // Limit to last 20 to save bandwidth
+      final snapshot = await _db.child('users/${user.uid}/match_history') // Check specific path used in game_board
+          .orderByKey()
+          .limitToLast(20)
+          .get();
+
+      // NOTE: In game_board.dart you save to 'users/$uid/matches',
+      // but in some previous code it might have been 'match_history'.
+      // I will assume 'matches' based on your previous 'game_board.dart' upload.
+      // If it returns empty, check the path in game_board.dart.
+
+      final matchSnap = await _db.child('users/${user.uid}/matches').limitToLast(20).get();
+
+      if (matchSnap.exists && matchSnap.value is Map) {
+        Map<dynamic, dynamic> map = matchSnap.value as Map;
+        List<Map<String, dynamic>> history = [];
+
+        map.forEach((key, value) {
+          final data = Map<String, dynamic>.from(value);
+          data['id'] = key;
+          history.add(data);
+        });
+
+        // Sort by timestamp descending (newest first)
+        history.sort((a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
+        return history;
+      }
+    } catch (e) {
+      print("Error fetching history: $e");
+    }
+    return [];
+  }
+
   Future<void> findMatch({String? chipId}) async {
     await findMultiplayerMatch(targetPlayers: 2, isTeam: false, chipId: chipId);
   }

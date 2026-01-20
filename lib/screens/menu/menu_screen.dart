@@ -17,6 +17,7 @@ import '../friends/friends_screen.dart';
 import '../account/data/avatar_data.dart';
 import '../account/avatar_selector.dart';
 import '../../database/online_service.dart';
+import '../friends/friends_games.dart';
 
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key});
@@ -433,7 +434,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
                       "FRIENDS",
                       Icons.people_alt,
                       Colors.amber,
-                          () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FriendsScreen()))
+                          () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FriendsGamesScreen()))
                   ),
                 ],
               ),

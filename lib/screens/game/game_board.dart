@@ -361,6 +361,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         'streak': currentStreak,
       });
 
+      List<int> winningIndicesFlat = [];
+      for (var seq in winningSequences) {
+        winningIndicesFlat.addAll(seq);
+      }
+
       dbRef.child('matches').push().set({
         'result': won ? 'win' : 'loss',
         'mode': widget.isOnline ? 'Online' : 'Offline',
@@ -368,6 +373,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         'coins_gained': coinsEarned,
         'timestamp': ServerValue.timestamp,
         'opponent_name': opponentName,
+        'board_snapshot': boardState.join(','),
+        'winning_indices': winningIndicesFlat.join(','),
       });
     }
 
