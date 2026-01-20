@@ -379,95 +379,7 @@ class OnlineService {
   // --- MATCHMAKING & GAMEPLAY ---
 
   Future<void> findMatch({String? chipId}) async {
-    final prefs = await SharedPreferences.getInstance();
-    _myId = _auth.currentUser?.uid ?? prefs.getString('unique_id');
-
-    String myHandle = prefs.getString('unique_handle') ?? "Player";
-    String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
-
-    try {
-      final snapshot = await _db.child('games')
-          .orderByChild('status')
-          .equalTo('waiting')
-          .get();
-
-      String? targetGameId;
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final twoMinutesAgo = now - (2 * 60 * 1000);
-
-      if (snapshot.exists) {
-        final games = Map<dynamic, dynamic>.from(snapshot.value as Map);
-        for (var id in games.keys) {
-          final g = games[id];
-          final createdAt = g['created_at'] ?? 0;
-
-          if (createdAt < twoMinutesAgo) {
-            _db.child('games/$id').remove();
-            _db.child('lobby/$id').remove();
-            continue;
-          }
-
-          targetGameId = id;
-          break; // Found a fresh lobby
-        }
-      }
-
-      if (targetGameId != null) {
-        final result = await _db.child('games/$targetGameId').runTransaction((Object? game) {
-          if (game == null) return Transaction.abort();
-          Map<String, dynamic> g = Map<String, dynamic>.from(game as Map);
-
-          if (g['status'] != 'waiting' || g['guest_id'] != null) {
-            return Transaction.abort();
-          }
-
-          g['status'] = 'playing';
-          g['guest_id'] = _myId;
-          g['guest_name'] = myHandle;
-          g['guest_avatar'] = myAvatar;
-          g['guest_chip_id'] = chipId ?? "default_red";
-          g['match_start_time'] = ServerValue.timestamp;
-
-          return Transaction.success(g);
-        });
-
-        if (result.committed) {
-          _gameId = targetGameId;
-          _playerRole = "guest";
-          await _saveCurrentGameSession(_gameId!, _playerRole!);
-          await _db.child('lobby').child(_gameId!).remove();
-          _listenToGame();
-          onMatchFound?.call();
-          return;
-        }
-      }
-
-      _gameId = _db.child('games').push().key;
-      _playerRole = "host";
-
-      final gameData = {
-        'status': 'waiting',
-        'created_at': ServerValue.timestamp, // For Lobby Expiration
-        'host_id': _myId,
-        'host_name': myHandle,
-        'host_avatar': myAvatar,
-        'host_chip_id': chipId ?? "default_blue",
-        'turn': 'host',
-        'board': List.filled(100, 0),
-      };
-
-      await _db.child('games/$_gameId').set(gameData);
-      await _db.child('lobby').child(_gameId!).set(_myId);
-
-      _db.child('games/$_gameId').onDisconnect().remove();
-      _db.child('lobby/$_gameId').onDisconnect().remove();
-
-      await _saveCurrentGameSession(_gameId!, _playerRole!);
-      _listenToGame();
-
-    } catch (e) {
-      onGameError?.call("Matchmaking error: $e");
-    }
+    await findMultiplayerMatch(targetPlayers: 2, isTeam: false, chipId: chipId);
   }
 
   void _listenToGame() {
@@ -712,14 +624,26 @@ class OnlineService {
 
   Future<void> cancelSearch() async {
     _gameSubscription?.cancel();
-    if (_gameId != null && _playerRole == 'host') {
-      try {
-        final snapshot = await _db.child('games/$_gameId/status').get();
-        if (snapshot.value == 'waiting') {
-          await _db.child('games/$_gameId').remove();
+
+    // UPDATED FIX: Properly check if we are the host (player_0) or a guest
+    if (_gameId != null) {
+      if (_playerRole == 'player_0' || _playerRole == 'host') {
+        try {
+          final snapshot = await _db.child('games/$_gameId/status').get();
+          if (snapshot.value == 'waiting') {
+            await _db.child('games/$_gameId').remove(); // Host cancels = delete lobby
+          }
+        } catch (e) {
+          print("Cancel error: $e");
         }
-      } catch (e) {
-        print("Cancel error: $e");
+      } else if (_playerRole != null) {
+        // If I am a guest (player_1, etc) in a waiting lobby, just remove myself
+        try {
+          final snapshot = await _db.child('games/$_gameId/status').get();
+          if (snapshot.value == 'waiting') {
+            await _db.child('games/$_gameId/players/$_playerRole').remove();
+          }
+        } catch (e) { print("Guest cancel error: $e"); }
       }
     }
     _gameId = null;
@@ -742,9 +666,18 @@ class OnlineService {
         .get();
 
     if (snapshot.exists) {
-      final games = Map<dynamic, dynamic>.from(snapshot.value as Map);
-      for (var id in games.keys) {
-        final g = games[id];
+      final gamesMap = Map<dynamic, dynamic>.from(snapshot.value as Map);
+
+      // FIX 2: Sort games so everyone tries the oldest lobby first (minimizes split lobbies)
+      var sortedKeys = gamesMap.keys.toList();
+      sortedKeys.sort((a, b) {
+        int timeA = gamesMap[a]['created_at'] ?? 0;
+        int timeB = gamesMap[b]['created_at'] ?? 0;
+        return timeA.compareTo(timeB); // Oldest first
+      });
+
+      for (var id in sortedKeys) {
+        final g = gamesMap[id];
         final createdAt = g['created_at'] ?? 0;
 
         if (g['status'] == 'waiting' && createdAt < twoMinutesAgo) {
@@ -759,6 +692,16 @@ class OnlineService {
             Map<String, dynamic> gData = Map<String, dynamic>.from(game as Map);
 
             Map players = gData['players'] ?? {};
+
+            // FIX 1: Transaction Logic Update: Am I already in this lobby?
+            // If yes, abort to prevent "Self-Matching" (Ghost Game)
+            bool alreadyIn = false;
+            players.forEach((k, v) {
+              if (v['id'] == _myId) alreadyIn = true;
+            });
+            if (alreadyIn) return Transaction.abort();
+
+            // Check if lobby is full
             if (players.length >= targetPlayers || gData['status'] != 'waiting') {
               return Transaction.abort();
             }
@@ -783,7 +726,6 @@ class OnlineService {
 
           if (result.committed) {
             _gameId = id;
-            // Determine our role from the transaction result
             final updatedPlayers = (result.snapshot.value as Map)['players'] as Map;
             _playerRole = updatedPlayers.entries.firstWhere((e) => e.value['id'] == _myId).key;
 
@@ -795,7 +737,7 @@ class OnlineService {
       }
     }
 
-    // Create new multiplayer lobby
+    // Create new multiplayer lobby if none found
     _gameId = _db.child('games').push().key;
     _playerRole = "player_0";
 
@@ -818,7 +760,6 @@ class OnlineService {
       }
     });
 
-    // If host leaves before match starts, kill the lobby
     _db.child('games/$_gameId').onDisconnect().remove();
 
     await _saveCurrentGameSession(_gameId!, _playerRole!);
