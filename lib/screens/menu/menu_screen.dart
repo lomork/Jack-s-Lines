@@ -16,6 +16,7 @@ import '../store/store_screen.dart';
 import '../friends/friends_screen.dart';
 import '../account/data/avatar_data.dart';
 import '../account/avatar_selector.dart';
+import '../../database/online_service.dart';
 
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key});
@@ -116,6 +117,10 @@ class HomeTab extends StatefulWidget {
 }
 
 class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
+
+  final OnlineService _onlineService = OnlineService();
+  StreamSubscription? _inviteSubscription;
+
   int userCoins = 1000;
   String selectedChipId = "default_blue";
   GameChip selectedChip = allGameChips[0];
@@ -138,11 +143,14 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
     _loadUserData();
     _listenForUpdates();
     _syncUserData();
+    _onlineService.setupPresence();
+    _setupInviteListener();
   }
 
   @override
   void dispose() {
     _rotateController.dispose();
+    _inviteSubscription?.cancel();
     super.dispose();
   }
 
@@ -538,6 +546,63 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       debugPrint("Sync Error: $e");
     }
   }
+
+  void _setupInviteListener() {
+    _inviteSubscription = _onlineService.getGameInvitesStream().listen((invites) {
+      if (invites.isNotEmpty) {
+        // Get the newest invite
+        final invite = invites.first;
+
+        // Show Dialog (ensure we aren't already showing one if possible)
+        if (mounted) {
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => AlertDialog(
+              backgroundColor: const Color(0xFF2C2C2C),
+              title: const Text("GAME INVITE", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              content: Text(
+                "${invite['from_name']} has challenged you to a match!",
+                style: const TextStyle(color: Colors.white70),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    // Reject
+                    _onlineService.rejectGameInvite(invite['key']);
+                    Navigator.pop(context);
+                  },
+                  child: const Text("DECLINE", style: TextStyle(color: Colors.redAccent)),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                  onPressed: () {
+                    // Accept & Join
+                    Navigator.pop(context); // Close dialog
+                    _onlineService.acceptGameInvite(invite);
+
+                    // Navigate to Online Game
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const GameBoard(
+                          difficulty: "Online",
+                          isOnline: true,
+                          playerCount: 2,
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text("ACCEPT", style: TextStyle(color: Colors.white)),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    });
+  }
+
 }
 
 // --- WIDGET 1: TITLE ANIMATOR ---

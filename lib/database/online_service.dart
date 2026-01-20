@@ -193,10 +193,13 @@ class OnlineService {
   }
 
   Stream<List<Map<String, dynamic>>> getGameInvitesStream() {
-    if (_myId == null) return const Stream.empty();
+    // FIX: Get current UID directly
+    final user = _auth.currentUser;
+    if (user == null) return const Stream.empty();
+    final myUid = user.uid;
 
     // Listen to notifications node for type 'game_invite'
-    return _db.child('notifications/$_myId').onValue.map((event) {
+    return _db.child('notifications/$myUid').onValue.map((event) {
       final List<Map<String, dynamic>> invites = [];
       if (event.snapshot.exists && event.snapshot.value is Map) {
         final data = Map<String, dynamic>.from(event.snapshot.value as Map);
@@ -373,6 +376,125 @@ class OnlineService {
       });
     } catch (e) {
       print("ERROR: Could not add friend: $e");
+    }
+  }
+
+  // 1. Send a Friend Request (Outgoing)
+  Future<void> sendFriendRequest(String targetUid) async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      print("ERROR: Cannot send request. User not logged in.");
+      return;
+    }
+    final myUid = user.uid;
+
+    // Write to my 'sent' list
+    await _db.child('users/$myUid/friend_requests_sent/$targetUid').set(ServerValue.timestamp);
+
+    // Write to target's 'received' list
+    await _db.child('users/$targetUid/friend_requests_received/$myUid').set(ServerValue.timestamp);
+
+    print("DEBUG: Request sent from $myUid to $targetUid");
+  }
+
+  // 2. Cancel a Friend Request (Outgoing)
+  Future<void> cancelFriendRequest(String targetUid) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final myUid = user.uid;
+
+    await _db.child('users/$myUid/friend_requests_sent/$targetUid').remove();
+    await _db.child('users/$targetUid/friend_requests_received/$myUid').remove();
+  }
+
+  // 3. Accept a Friend Request (Incoming)
+  Future<void> acceptFriendRequest(String requesterUid) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final myUid = user.uid;
+
+    // Add to both friends lists
+    await _db.child('users/$myUid/friends/$requesterUid').set({'status': 'active'});
+    await _db.child('users/$requesterUid/friends/$myUid').set({'status': 'active'});
+
+    // Remove the requests
+    await _db.child('users/$myUid/friend_requests_received/$requesterUid').remove();
+    await _db.child('users/$requesterUid/friend_requests_sent/$myUid').remove();
+  }
+
+  // 4. Reject/Delete a Friend Request
+  Future<void> rejectFriendRequest(String requesterUid) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final myUid = user.uid;
+
+    await _db.child('users/$myUid/friend_requests_received/$requesterUid').remove();
+    await _db.child('users/$requesterUid/friend_requests_sent/$myUid').remove();
+  }
+
+  // 5. Remove a Friend
+  Future<void> removeFriend(String friendUid) async {
+    // FIX: Get current UID directly from Auth to ensure it is not null
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final myUid = user.uid;
+
+    try {
+      // Remove from my list
+      await _db.child('users/$myUid/friends/$friendUid').remove();
+      // Remove from their list
+      await _db.child('users/$friendUid/friends/$myUid').remove();
+    } catch (e) {
+      print("Error removing friend: $e");
+    }
+  }
+
+  // 6. Streams for the Lists
+  Stream<DatabaseEvent> getIncomingRequestsStream() {
+    final user = _auth.currentUser;
+    if (user == null) {
+      print("DEBUG: User is null. Cannot listen to incoming requests.");
+      return const Stream.empty();
+    }
+    print("DEBUG: Listening for requests at 'users/${user.uid}/friend_requests_received'");
+    return _db.child('users/${user.uid}/friend_requests_received').onValue;
+  }
+
+  Stream<DatabaseEvent> getOutgoingRequestsStream() {
+    final user = _auth.currentUser;
+    if (user == null) {
+      print("DEBUG: User is null. Cannot listen to outgoing requests.");
+      return const Stream.empty();
+    }
+    print("DEBUG: Listening for sent requests at 'users/${user.uid}/friend_requests_sent'");
+    return _db.child('users/${user.uid}/friend_requests_sent').onValue;
+  }
+
+  // UPDATED: Get Public Data + Stats (for the Modal)
+  Future<Map<String, dynamic>?> getFriendStats(String uid) async {
+    try {
+      // Try fetching from public profile first
+      final publicSnap = await _db.child('public_profiles/$uid').get();
+      Map<String, dynamic> data = {};
+
+      if (publicSnap.exists) {
+        data.addAll(Map<String, dynamic>.from(publicSnap.value as Map));
+      }
+
+      // Try fetching stats from the user node (if rules allow, or if we sync them)
+      // Note: In a real app, you should sync 'wins' to public_profiles in recordGameEnd.
+      // For now, we try to read the user node directly.
+      final userSnap = await _db.child('users/$uid').get();
+      if (userSnap.exists) {
+        final userData = Map<String, dynamic>.from(userSnap.value as Map);
+        data['matches_won'] = userData['matches_won'] ?? 0;
+        data['matches_played'] = userData['matches_played'] ?? 0;
+        data['selected_chip'] = userData['selected_chip_id'] ?? "default_chip";
+      }
+      return data;
+    } catch (e) {
+      print("Error fetching stats: $e");
+      return null;
     }
   }
 
@@ -589,24 +711,19 @@ class OnlineService {
   // --- PRESENCE & CLEANUP ---
 
   void setupPresence() {
-    if (_myId == null) return;
     final user = _auth.currentUser;
     if (user == null) return;
+    _myId = user.uid; // Ensure local ID is set
 
     final presenceRef = _db.child('presence/${user.uid}');
-    final publicStatusRef = _db.child('public_profiles/${user.uid}/status');
+    final connectedRef = _db.child('.info/connected');
 
-    // Listen to the special '.info/connected' node to detect client-side connection status
-    FirebaseDatabase.instance.ref('.info/connected').onValue.listen((event) {
+    connectedRef.onValue.listen((event) {
       final connected = event.snapshot.value as bool? ?? false;
       if (connected) {
-        // Set status to online when connected
+        // Write simple string 'online' for easy checking
         presenceRef.set('online');
-        publicStatusRef.set('online');
-
-        // Use onDisconnect to ensure Firebase cleans up if the app is killed
-        presenceRef.onDisconnect().set('offline');
-        publicStatusRef.onDisconnect().set('offline');
+        presenceRef.onDisconnect().remove(); // Disappear when app closes
       }
     });
   }
