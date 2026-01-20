@@ -50,6 +50,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   bool _isOpponentOffline = false;
 
   List<String> deck = [];
+  List<String> discardPile = [];
   final List<String> playerHand = [];
   final List<String> opponentHand = [];
   final List<int> boardState = List.filled(100, 0);
@@ -59,6 +60,8 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   int? _partnerHoverIndex;
   Timer? _botTimer;
   bool _showAddBotButton = false;
+  int _lastTurnIndex = -1;
+  int _lastSfxTimestamp = 0;
 
   List<Map<String, dynamic>> moveLog = [];
 
@@ -371,26 +374,28 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Future<void> _checkForDeadCards(
-    List<String> hand, {
-    bool isPlayer = true,
-  }) async {
+      List<String> hand, {
+        bool isPlayer = true,
+      }) async {
     List<String> deadCards = [];
+
+    // Use the helper we added to DeckManager
     for (String card in hand) {
-      if (card.contains('J')) continue; // Jacks are never dead
-      List<int> pos = [];
-      for (int i = 0; i < boardLayout.length; i++) {
-        if (boardLayout[i] == card) pos.add(i);
-      }
-      // A card is dead if all its board positions are occupied
-      if (pos.isNotEmpty && pos.every((idx) => boardState[idx] != 0)) {
+      if (DeckManager.isCardDead(card, boardLayout, boardState)) {
         deadCards.add(card);
       }
     }
 
     if (deadCards.isNotEmpty) {
-      setState(() => burningCards.addAll(deadCards));
+      // 1. Move to discard pile
+      setState(() {
+        burningCards.addAll(deadCards);
+        discardPile.addAll(deadCards); // RECYCLE: Add to discard pile
+      });
+
       HapticFeedback.heavyImpact();
-      // Use existing particle logic
+
+      // Visuals
       for (int i = 0; i < 20; i++) {
         particles.add(
           _AshParticle(Offset(MediaQuery.of(context).size.width / 2, 600)),
@@ -398,6 +403,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       }
 
       await Future.delayed(const Duration(milliseconds: 1200));
+
       if (!mounted) return;
 
       setState(() {
@@ -407,6 +413,11 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         }
         burningCards.clear();
       });
+
+      // 2. RECURSIVE CHECK
+      // We call this function again immediately to check if the *new* cards
+      // we just drew are also dead. This loops until the hand is clean.
+      await _checkForDeadCards(hand, isPlayer: isPlayer);
     }
   }
 
@@ -506,6 +517,32 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
               .toList();
         });
       }
+
+      if (data['sfx_event'] != null) {
+        final sfx = data['sfx_event'];
+        int ts = sfx['timestamp'] ?? 0;
+        String file = sfx['file'] ?? "";
+
+        // Only play if this is a NEW sound (timestamp is newer than what we've seen)
+        // and we aren't the one who just played it (optional, but prevents double audio if you play locally too)
+        if (ts > _lastSfxTimestamp && file.isNotEmpty) {
+          _lastSfxTimestamp = ts;
+          // Play the sound!
+          SoundManager.play(file);
+
+          // Show a mini indicator or toast (Optional)
+          if (!isSoundBoardOpen) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text("Opponent played: ${file.split('.').first.toUpperCase()}"),
+                duration: const Duration(milliseconds: 1000),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        }
+      }
+
       // Monitor for other players going offline during the match
       if (data['status'] == 'playing' && !isGameOver) {
         for (var p in playersInfo) {
@@ -536,7 +573,17 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         setState(() {
           isLoading = false;
           _isOpponentOffline = disconnected;
-          currentTurnIndex = data['turn_index'] ?? 0;
+
+          int newTurnIndex = data['turn_index'] ?? 0;
+
+          // FIX: Only restart the timer if the turn has ACTUALLY changed
+          if (newTurnIndex != _lastTurnIndex) {
+            currentTurnIndex = newTurnIndex;
+            _lastTurnIndex = newTurnIndex;
+            _startTurnTimer(); // Reset timer only on new turn
+          }
+
+          //currentTurnIndex = data['turn_index'] ?? 0;
 
           String myRole = _onlineService!.myRole;
           int mySlotIndex = int.parse(myRole.split('_').last);
@@ -555,7 +602,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           }
 
           _stopSearchAnimation();
-          _startTurnTimer();
+          //_startTurnTimer();
           checkForWin();
         });
 
@@ -733,6 +780,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         isJack && (selectedCard!.contains('C') || selectedCard!.contains('S'));
 
     bool success = false;
+    int valueToSet = myChipValue;
 
     if (isJack) {
       if (isBlackJack && boardState[index] == 0)
@@ -741,8 +789,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
           boardState[index] != 0 &&
           boardState[index] != myChipValue) {
         if (!_isChipLocked(index)) {
-          _executeMove(index, 0); // Red Jacks remove chips
-          return;
+          valueToSet = 0;
+          success = true;
+          //_executeMove(index, 0); // Red Jacks remove chips
         }
       }
     } else {
@@ -750,13 +799,17 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     }
 
     if (success) {
+      HapticFeedback.lightImpact();
+      if (selectedCard != null) {
+        discardPile.add(selectedCard!);
+      }
       if (widget.isOnline) {
-        // ONLINE: Send to server and let the listener update the board
         int nextTurn = (currentTurnIndex + 1) % widget.playerCount;
         _onlineService?.sendMultiplayerMove(
           index,
           selectedCard!,
-          myChipValue,
+          valueToSet,
+          //myChipValue,
           nextTurn,
         );
 
@@ -768,11 +821,12 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       } else {
         // OFFLINE: Execute locally and finish the turn to trigger AI
         setState(() {
-          boardState[index] = myChipValue;
-          lastPlacedChipIndex = index;
+          boardState[index] = valueToSet;
+          lastPlacedChipIndex = (valueToSet == 0) ? null : index;
           lastUsedCard = selectedCard;
           playerHand.remove(selectedCard);
-          if (deck.isNotEmpty) playerHand.add(_drawCard(isPlayer: true));
+          playerHand.add(_drawCard(isPlayer: true));
+          //if (deck.isNotEmpty) playerHand.add(_drawCard(isPlayer: true));
           selectedCard = null;
         });
         _finishTurn(isPlayer: true);
@@ -788,13 +842,21 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       'card': selectedCard,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
+
+    // Add used card to discard pile
+    if (selectedCard != null) {
+      discardPile.add(selectedCard!);
+    }
+
     if (widget.isOnline) {
       _onlineService?.sendMove(index, selectedCard!, value);
       setState(() {
         lastUsedCard = selectedCard;
         playerHand.remove(selectedCard);
         selectedCard = null;
-        if (deck.isNotEmpty) playerHand.add(_drawCard(isPlayer: true));
+        if (deck.isNotEmpty || discardPile.isNotEmpty) {
+          playerHand.add(_drawCard(isPlayer: true));
+        }
         isPlayerTurn = false;
       });
       _startTurnTimer();
@@ -805,33 +867,37 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
         lastUsedCard = selectedCard;
         playerHand.remove(selectedCard);
         selectedCard = null;
-        if (deck.isNotEmpty) playerHand.add(_drawCard(isPlayer: true));
+        if (deck.isNotEmpty || discardPile.isNotEmpty) {
+          playerHand.add(_drawCard(isPlayer: true));
+        }
       });
       _finishTurn(isPlayer: true);
     }
   }
 
   String _drawCard({required bool isPlayer}) {
-    if (deck.isEmpty) return "";
-    if (isPlayer && !widget.isOnline) {
-      int pSeqs = 0, aSeqs = 0;
-      for (var seq in winningSequences) {
-        bool p1 = false;
-        for (int idx in seq) {
-          if (!cornerIndices.contains(idx)) {
-            if (boardState[idx] == 1) p1 = true;
-            break;
-          }
-        }
-        if (p1)
-          pSeqs++;
-        else
-          aSeqs++;
+    // 1. Reshuffle if empty
+    if (deck.isEmpty) {
+      if (discardPile.isEmpty) {
+        return "CORNER"; // Should effectively never happen with 104 cards unless board is full
       }
-      if (aSeqs > pSeqs && Random().nextDouble() < 0.25) {
-        int jIdx = deck.indexWhere((c) => c.contains('J'));
-        if (jIdx != -1) return deck.removeAt(jIdx);
+
+      // Trigger a small visual notification (optional)
+      if (isPlayer) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Reshuffling Discard Pile..."),
+            duration: Duration(milliseconds: 1000),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
       }
+
+      setState(() {
+        deck.addAll(discardPile);
+        deck.shuffle();
+        discardPile.clear();
+      });
     }
     return deck.removeLast();
   }
@@ -889,49 +955,94 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     if (move != null) {
       if (move.isDiscard) {
         //
-        // AI "burns" the card - update the UI so the player sees what happened
         setState(() {
+          if (move.isRemoval) {
+            boardState[move.index] = 0;
+          } else {
+            boardState[move.index] = 2;
+            lastPlacedChipIndex = move.index;
+          }
           lastUsedCard = move.cardUsed;
-          opponentSelectedCard = move.cardUsed;
+
+          // RECYCLE
+          discardPile.add(move.cardUsed);
+
+          opponentHand.remove(move.cardUsed);
+          opponentSelectedCard = null;
+          aiCursorPosition = null;
+
+          // Draw with checking both deck and discard
+          if (deck.isNotEmpty || discardPile.isNotEmpty) {
+            opponentHand.add(_drawCard(isPlayer: false));
+          }
         });
         await Future.delayed(
           const Duration(milliseconds: 800),
         ); // Give player time to see it
       } else {
         // Normal move logic
-        Offset target = _getBoardCellCenter(move.index); //
+        Offset target = _getBoardCellCenter(move.index);
         setState(() {
           opponentSelectedCard = move.cardUsed;
           aiCursorPosition = Offset(
             MediaQuery.of(context).size.width / 2,
             40,
-          ); //
+          );
         });
 
-        await Future.delayed(const Duration(milliseconds: 50)); //
-        setState(() => aiCursorPosition = target); //
-        await Future.delayed(const Duration(milliseconds: 800)); //
+        await Future.delayed(const Duration(milliseconds: 50));
+        setState(() => aiCursorPosition = target);
+        await Future.delayed(const Duration(milliseconds: 800));
 
         if (!mounted) return;
         setState(() {
           if (move.isRemoval) {
-            //
-            boardState[move.index] = 0; //
+
+            boardState[move.index] = 0;
           } else {
-            boardState[move.index] = 2; //
-            lastPlacedChipIndex = move.index; //
+            boardState[move.index] = 2;
+            lastPlacedChipIndex = move.index;
           }
-          lastUsedCard = move.cardUsed; //
-          opponentHand.remove(move.cardUsed); //
-          opponentSelectedCard = null; //
-          aiCursorPosition = null; //
-          if (deck.isNotEmpty) opponentHand.add(deck.removeLast()); //
+          lastUsedCard = move.cardUsed;
+          opponentHand.remove(move.cardUsed);
+          opponentSelectedCard = null;
+          aiCursorPosition = null;
+          if (deck.isNotEmpty) opponentHand.add(deck.removeLast());
         });
       }
     }
 
-    // Ensure this is called AFTER the if(move != null) block concludes
-    _finishTurn(isPlayer: false); //
+    _finishTurn(isPlayer: false);
+  }
+
+  Widget _buildDeckLowWarning() {
+    if (deck.length > 5) return const SizedBox();
+
+    return Positioned(
+      top: 130, // Just below the header
+      right: 20,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+            color: Colors.redAccent.withOpacity(0.9),
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(color: Colors.red.withOpacity(0.4), blurRadius: 8, spreadRadius: 2)
+            ]
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 16),
+            const SizedBox(width: 6),
+            Text(
+              "${deck.length} Cards Left",
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void checkForWin() {

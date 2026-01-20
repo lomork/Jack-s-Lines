@@ -39,6 +39,26 @@ class DeckManager {
     return deck;
   }
 
+  static bool isCardDead(String card, List<String> boardLayout, List<int> boardState) {
+    // Jacks (Wilds) are never dead
+    if (card.contains('J')) return false;
+
+    // Find all positions of this card on the board
+    List<int> positions = [];
+    for (int i = 0; i < boardLayout.length; i++) {
+      if (boardLayout[i] == card) {
+        positions.add(i);
+      }
+    }
+
+    // A card is dead ONLY if it exists on the board AND all its spots are taken
+    if (positions.isNotEmpty && positions.every((idx) => boardState[idx] != 0)) {
+      return true;
+    }
+
+    return false;
+  }
+
   /// Returns a NEW shuffled deck (Used by OnlineService to init game state)
   static List<String> getShuffledDeck() {
     List<String> deck = createFullDeck();

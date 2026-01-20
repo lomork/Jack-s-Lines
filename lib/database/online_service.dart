@@ -536,13 +536,13 @@ class OnlineService {
     });
   }
 
-  Future<void> sendSound(String soundName) async {
-    if (_gameId == null) return;
-    await _db.child('games/$_gameId').update({
-      'last_sound': {
-        'name': soundName,
-        'sender': _myId,
-        'time': ServerValue.timestamp,
+  Future<void> sendSound(String fileName) async {
+    if (currentGameId == null) return;
+    // We send a timestamp so the listener fires even if the same sound is played twice in a row
+    await _db.child('games').child(currentGameId!).update({
+      'sfx_event': {
+        'file': fileName,
+        'timestamp': ServerValue.timestamp,
       }
     });
   }
