@@ -156,8 +156,8 @@ class OnlineService {
     return [];
   }
 
-  Future<void> sendGameInvite(String friendUid, String myName) async {
-    if (_myId == null) return;
+  Future<String?> sendGameInvite(String friendUid, String myName) async {
+    if (_myId == null) return null;
 
     // 1. Create a private game lobby
     String gameId = _db.child('games').push().key!;
@@ -168,7 +168,7 @@ class OnlineService {
       'host_id': _myId,
       'host_name': myName,
       'created_at': ServerValue.timestamp,
-      'is_private': true, // Mark as private so random matchmakers don't join
+      'is_private': true,
       'invited_player': friendUid,
     });
 
@@ -185,6 +185,28 @@ class OnlineService {
     _gameId = gameId;
     _playerRole = "host";
     _listenToGame();
+
+    return gameId;
+  }
+
+  Future<void> cancelGameInvite(String gameId, String friendUid) async {
+    // 1. Remove the Game Lobby
+    await _db.child('games/$gameId').remove();
+
+    // 2. Clean up the notification (Optional but cleaner)
+    // We query notifications for this user that match the gameId
+    final notifRef = _db.child('notifications/$friendUid');
+    final snapshot = await notifRef.orderByChild('game_id').equalTo(gameId).get();
+
+    if (snapshot.exists) {
+      for (var child in snapshot.children) {
+        await child.ref.remove();
+      }
+    }
+
+    _gameSubscription?.cancel();
+    _gameId = null;
+    _playerRole = null;
   }
 
   // --- NEW: Fetch Realtime Presence ---
@@ -225,7 +247,7 @@ class OnlineService {
     await _db.child('games/$gameId').update({
       'status': 'playing',
       'guest_id': _myId,
-      'guest_name': await _getMyHandle(), // Helper method (see below)
+      'guest_name': await getMyHandle(), // Helper method (see below)
       'guest_avatar': await _getMyAvatar(),
       'match_start_time': ServerValue.timestamp,
     });
@@ -237,7 +259,7 @@ class OnlineService {
     await _db.child('notifications/${invite['from_uid']}').push().set({
       'type': 'game_accept',
       'from_uid': _myId,
-      'from_name': await _getMyHandle(),
+      'from_name': await getMyHandle(),
       'game_id': gameId,
       'timestamp': ServerValue.timestamp,
     });
@@ -277,7 +299,7 @@ class OnlineService {
     return myGames;
   }
 
-  Future<String> _getMyHandle() async {
+  Future<String> getMyHandle() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('unique_handle') ?? "Player";
   }
