@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../../../database/online_service.dart';
 import '../../account/data/avatar_data.dart';
 import '../../game/game_board.dart';
+import '../../../state/user_state_manager.dart';
 
 class FriendsTab extends StatefulWidget {
   const FriendsTab({super.key});
@@ -198,11 +199,9 @@ class _FriendsTabState extends State<FriendsTab> {
                     ),
                     onPressed: () async {
                       // 1. Send Invite and Get ID
-                      String? gameId = await _onlineService.sendGameInvite(uid, await _onlineService.getMyHandle()); // Helper needed or pass name
+                      String myName = UserStateManager.instance.username;
+                      String? gameId = await _onlineService.sendGameInvite(uid, myName); // Helper needed or pass name
 
-                      // For simplicity, we can fetch my name from cache or just pass "Player" temporarily
-                      // if getMyHandle isn't public. Assuming logic from OnlineService:
-                      String myName = "Me"; // You might want to fetch actual name
 
                       if (gameId != null && mounted) {
                         // 2. Show Waiting Dialog

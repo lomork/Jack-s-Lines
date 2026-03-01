@@ -157,7 +157,9 @@ class OnlineService {
   }
 
   Future<String?> sendGameInvite(String friendUid, String myName) async {
-    if (_myId == null) return null;
+    final user = _auth.currentUser;
+    if (user == null) return null;
+    final String myId = user.uid;
 
     // 1. Create a private game lobby
     String gameId = _db.child('games').push().key!;
@@ -165,7 +167,7 @@ class OnlineService {
     // 2. Setup the game entry
     await _db.child('games/$gameId').set({
       'status': 'waiting',
-      'host_id': _myId,
+      'host_id': myId,
       'host_name': myName,
       'created_at': ServerValue.timestamp,
       'is_private': true,
@@ -175,7 +177,7 @@ class OnlineService {
     // 3. Send a notification to the friend
     await _db.child('notifications/$friendUid').push().set({
       'type': 'game_invite',
-      'from_uid': _myId,
+      'from_uid': myId,
       'from_name': myName,
       'game_id': gameId,
       'timestamp': ServerValue.timestamp,
@@ -184,6 +186,7 @@ class OnlineService {
     // 4. Join yourself and wait
     _gameId = gameId;
     _playerRole = "host";
+    _myId = myId;
     _listenToGame();
 
     return gameId;
@@ -240,25 +243,29 @@ class OnlineService {
   }
 
   Future<void> acceptGameInvite(Map<String, dynamic> invite) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final String myUid = user.uid;
+
     final String gameId = invite['game_id'];
     final String notifKey = invite['key'];
 
     // Join the game
     await _db.child('games/$gameId').update({
       'status': 'playing',
-      'guest_id': _myId,
+      'guest_id': myUid,
       'guest_name': await getMyHandle(), // Helper method (see below)
       'guest_avatar': await _getMyAvatar(),
       'match_start_time': ServerValue.timestamp,
     });
 
     // Delete the invitation notification
-    await _db.child('notifications/$_myId/$notifKey').remove();
+    await _db.child('notifications/$myUid/$notifKey').remove();
 
     // Notify the host that we accepted (This triggers their "Come Back" notification)
     await _db.child('notifications/${invite['from_uid']}').push().set({
       'type': 'game_accept',
-      'from_uid': _myId,
+      'from_uid': myUid,
       'from_name': await getMyHandle(),
       'game_id': gameId,
       'timestamp': ServerValue.timestamp,
@@ -271,13 +278,19 @@ class OnlineService {
   }
 
   Future<void> rejectGameInvite(String notifKey) async {
-    if (_myId != null) {
-      await _db.child('notifications/$_myId/$notifKey').remove();
-    }
+    final user = _auth.currentUser;
+    if (user == null) return;
+    await _db.child('notifications/${user.uid}/$notifKey').remove();
   }
 
   Future<List<Map<String, dynamic>>> getCompletedGames() async {
-    if (_myId == null) return [];
+    final user = _auth.currentUser;
+
+    // 2. If they are logged out, immediately abort
+    if (user == null) return [];
+
+    // 3. Extract the fresh UID
+    final String currentUid = user.uid;
 
     // fetch all games (Optimization: Create a specific 'user_games/$uid' node in the future)
     final snapshot = await _db.child('games').orderByChild('status').equalTo('finished').get();
@@ -288,7 +301,7 @@ class OnlineService {
       data.forEach((key, value) {
         final g = Map<String, dynamic>.from(value);
         // Check if I was a player
-        if (g['host_id'] == _myId || g['guest_id'] == _myId) {
+        if (g['host_id'] == currentUid || g['guest_id'] == currentUid) {
           g['id'] = key;
           myGames.add(g);
         }
@@ -371,12 +384,14 @@ class OnlineService {
   // --- FRIENDS LOGIC ---
 
   Stream<DatabaseEvent> getFriendsStream() {
-    final user = _auth.currentUser;
+    final user = FirebaseAuth.instance.currentUser;
     if (user == null) return const Stream.empty();
-    return _db.child('users/${user.uid}/friends').onValue;
+    return FirebaseDatabase.instance.ref('users/${user.uid}/friends').onValue;
   }
 
   Future<Map<String, dynamic>?> getFriendPublicData(String friendUid) async {
+    final user = _auth.currentUser;
+    if (user == null) return null;
     try {
       final snapshot = await _db.child('public_profiles/$friendUid').get();
       if (snapshot.exists) {
@@ -565,6 +580,7 @@ class OnlineService {
   }
 
   void _listenToGame() {
+
     if (_gameId == null) return;
     _gameSubscription = _db.child('games/$_gameId').onValue.listen((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
@@ -623,9 +639,12 @@ class OnlineService {
 
   Future<void> sendBurnAction(String card) async {
     if (_gameId == null) return;
+    final user = _auth.currentUser;
+    if (user == null) return;
+
     await _db.child('games/$_gameId/last_burn').set({
       'card': card,
-      'sender': _myId,
+      'sender': user.uid,
       'time': ServerValue.timestamp,
     });
   }
@@ -643,9 +662,12 @@ class OnlineService {
 
   Future<void> sendForfeit() async {
     if (_gameId == null) return;
+    final user = _auth.currentUser;
+    if (user == null) return;
+
     await _db.child('games/$_gameId').update({
       'status': 'forfeit',
-      'loser': _myId,
+      'loser': user.uid,
     });
   }
 
@@ -689,8 +711,11 @@ class OnlineService {
 
   Future<void> sendChatMessage(String text) async {
     if (_gameId == null || text.trim().isEmpty) return;
+    final user = _auth.currentUser;
+    if (user == null) return;
+
     await _db.child('games/$_gameId/chats').push().set({
-      'sender': _myId,
+      'sender': user.uid,
       'text': text,
       'timestamp': ServerValue.timestamp,
     });
@@ -829,7 +854,11 @@ class OnlineService {
 
   Future<void> findMultiplayerMatch({required int targetPlayers, required bool isTeam, String? chipId}) async {
     final prefs = await SharedPreferences.getInstance();
-    _myId = _auth.currentUser?.uid;
+    final user = _auth.currentUser;
+    if (user == null) return;
+    final String myUid = user.uid;
+    _myId = myUid;
+    //_myId = _auth.currentUser?.uid;
     String myName = prefs.getString('unique_handle') ?? "Player";
     String myAvatar = prefs.getString('selected_avatar_id') ?? "avatar_1";
 

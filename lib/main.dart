@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'database/online_service.dart';
 import 'screens/menu/menu_screen.dart';
 import 'screens/authorize/login_screen.dart';
+import 'screens/data/data_loading.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,7 +40,7 @@ class MyApp extends StatelessWidget {
           }
           if (snapshot.hasData) {
             OnlineService().setupPresence();
-            return const MenuScreen();
+            return const DataLoadingScreen();
           }
           return const LoginScreen(); // User needs to login
         },

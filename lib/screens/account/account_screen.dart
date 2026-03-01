@@ -61,7 +61,7 @@ class _AccountScreenState extends State<AccountScreen> with TickerProviderStateM
     _rotateController = AnimationController(vsync: this, duration: const Duration(seconds: 15))..repeat();
     _chipRotateController = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
     _pulseController = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
-    _loadLocalData();
+    //_loadLocalData();
     _setupRealtimeListener();
     _setupMatchHistoryListener();
   }
@@ -74,19 +74,6 @@ class _AccountScreenState extends State<AccountScreen> with TickerProviderStateM
     _chipRotateController.dispose();
     _pulseController.dispose();
     super.dispose();
-  }
-
-  Future<void> _loadLocalData() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() {
-      selectedChipId = prefs.getString(chipKey) ?? "default_blue";
-      ownedChipIds = prefs.getStringList('owned_chip_ids') ?? ["default_blue"];
-      selectedTheme = prefs.getString('selected_theme') ?? "default";
-      _avatarId = prefs.getString(avatarKey) ?? "avatar_1";
-      totalLosses = prefs.getInt('total_losses') ?? 0;
-      totalCoins = prefs.getInt('total_coins') ?? 0;
-    });
   }
 
   void _setupRealtimeListener() {

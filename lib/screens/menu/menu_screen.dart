@@ -18,6 +18,7 @@ import '../account/data/avatar_data.dart';
 import '../account/avatar_selector.dart';
 import '../../database/online_service.dart';
 import '../friends/friends_games.dart';
+import '../../state/user_state_manager.dart';
 
 class MenuScreen extends StatefulWidget {
   const MenuScreen({super.key});
@@ -122,15 +123,15 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
   final OnlineService _onlineService = OnlineService();
   StreamSubscription? _inviteSubscription;
 
-  int userCoins = 1000;
-  String selectedChipId = "default_blue";
+  int get userCoins => UserStateManager.instance.userCoins;
+  String get selectedChipId => UserStateManager.instance.selectedChipId;
   GameChip selectedChip = allGameChips[0];
 
   // NEW VARIABLES
-  String _avatarId = "avatar_1";
-  int _streak = 0;
-  int _lives = 5;
-  String _username = "Player";
+  String get _avatarId => UserStateManager.instance.avatarId;
+  int get _streak => UserStateManager.instance.streak;
+  int get _lives => UserStateManager.instance.lives;
+  String get _username => UserStateManager.instance.username;
 
   late AnimationController _rotateController;
 
@@ -141,7 +142,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
       vsync: this,
       duration: const Duration(seconds: 8),
     )..repeat();
-    _loadUserData();
+    //_loadUserData();
     _listenForUpdates();
     _syncUserData();
     _onlineService.setupPresence();
@@ -161,46 +162,10 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         timer.cancel();
         return;
       }
-      _loadUserData();
+      //_loadUserData();
     });
   }
 
-  Future<void> _loadUserData() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    // Fetch latest from Firebase
-    String? uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid != null) {
-      final dbRef = FirebaseDatabase.instance.ref('users/$uid');
-      final snapshot = await dbRef.get();
-      if (snapshot.exists) {
-        final data = snapshot.value as Map;
-        await prefs.setInt('streak', data['streak'] ?? 0);
-        await prefs.setInt('lives', data['lives'] ?? 5);
-        if (data['avatar_id'] != null) {
-          await prefs.setString('selected_avatar_id', data['avatar_id']);
-        }
-        if (data['selected_chip_id'] != null) {
-          await prefs.setString('selected_chip_id', data['selected_chip_id']);
-        }
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        userCoins = prefs.getInt('user_coins') ?? 1000;
-        selectedChipId = prefs.getString('selected_chip_id') ?? "default_blue";
-        selectedChip = allGameChips.firstWhere(
-          (c) => c.id == selectedChipId,
-          orElse: () => allGameChips[0],
-        );
-        _avatarId = prefs.getString('selected_avatar_id') ?? "avatar_1";
-        _streak = prefs.getInt('streak') ?? 0;
-        _lives = prefs.getInt('lives') ?? 5;
-        _username = prefs.getString('unique_handle') ?? "Player";
-      });
-    }
-  }
 
   void _showDifficultyDialog() {
     showDialog(
@@ -539,7 +504,7 @@ class _HomeTabState extends State<HomeTab> with SingleTickerProviderStateMixin {
         // 5. Refresh UI
         if (mounted) {
           setState(() {
-            _loadUserData(); // Reload the UI with the final values
+            //_loadUserData(); // Reload the UI with the final values
           });
         }
       }
