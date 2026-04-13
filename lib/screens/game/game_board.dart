@@ -811,15 +811,23 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
     int valueToSet = myChipValue;
 
     if (isJack) {
-      if (isBlackJack && boardState[index] == 0)
+      if (isBlackJack && boardState[index] == 0) {
         success = true; // Anywhere empty
-      else if (isRedJack &&
+      } else if (isRedJack &&
           boardState[index] != 0 &&
           boardState[index] != myChipValue) {
         if (!_isChipLocked(index)) {
           valueToSet = 0;
           success = true;
-          //_executeMove(index, 0); // Red Jacks remove chips
+        }else {
+          HapticFeedback.heavyImpact();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("BLOCKED: That chip is part of a locked sequence!"),
+              backgroundColor: Colors.redAccent,
+              duration: Duration(seconds: 2),
+            ),
+          );
         }
       }
     } else {
@@ -968,9 +976,10 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
   }
 
   Future<void> _startAiTurn() async {
-    //
-    await Future.delayed(const Duration(milliseconds: 1000)); //
-    if (!mounted) return; //
+    await Future.delayed(const Duration(milliseconds: 1000));
+    if (!mounted) return;
+
+    Set<int> lockedIndices = winningSequences.expand((seq) => seq).toSet();
 
     AiMove? move = AiLogic.findBestMove(
       opponentHand,
@@ -978,6 +987,7 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       boardLayout,
       currentAiDifficulty,
       2,
+      lockedIndices,
     );
 
     if (move != null) {
@@ -1075,9 +1085,9 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
 
   void checkForWin() {
     int winTarget = (widget.playerCount == 3) ? 1 : 2;
-    Map<int, int> teamSequences = {1: 0, 2: 0, 3: 0};
     List<List<int>> potential = [];
 
+    // 1. Find all potential 5-in-a-rows on the board
     for (int i = 0; i < 100; i++) {
       if (i % 10 <= 5) _checkLine(i, 1, potential);
       if (i < 60) _checkLine(i, 10, potential);
@@ -1085,11 +1095,13 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       if (i % 10 >= 4 && i < 60) _checkLine(i, 9, potential);
     }
 
-    winningSequences.clear();
+    // DO NOT CLEAR winningSequences!
+    // We treat winningSequences as a permanent historical record.
 
+    // 2. Validate potential sequences against established ones
     for (var seq in potential) {
       int firstChipIdx = seq.firstWhere(
-        (idx) => !cornerIndices.contains(idx),
+            (idx) => !cornerIndices.contains(idx),
         orElse: () => -1,
       );
       if (firstChipIdx == -1) continue;
@@ -1097,7 +1109,6 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
       int ownerValue = boardState[firstChipIdx];
       if (ownerValue == 0) continue;
 
-      // Fix for overlapping sequences
       bool isDistinct = true;
       for (var existingSeq in winningSequences) {
         int sharedCount = 0;
@@ -1106,19 +1117,35 @@ class _GameBoardState extends State<GameBoard> with TickerProviderStateMixin {
             sharedCount++;
           }
         }
+        // Standard rules: A sequence can only share 1 intersecting chip with another sequence.
+        // If it shares 2 or more, it's just an extension (like a 6th chip) and is ignored.
         if (sharedCount > 1) {
           isDistinct = false;
           break;
         }
       }
 
+      // 3. Lock it in permanently
       if (isDistinct) {
         winningSequences.add(seq);
-        teamSequences[ownerValue] = (teamSequences[ownerValue] ?? 0) + 1;
       }
     }
 
-    teamSequences.forEach((owner, count) {
+    // 4. Calculate scores based ONLY on permanently locked sequences
+    Map<int, int> teamScores = {1: 0, 2: 0, 3: 0};
+    for (var seq in winningSequences) {
+      int firstChipIdx = seq.firstWhere(
+            (idx) => !cornerIndices.contains(idx),
+        orElse: () => -1,
+      );
+      if (firstChipIdx != -1) {
+        int ownerValue = boardState[firstChipIdx];
+        teamScores[ownerValue] = (teamScores[ownerValue] ?? 0) + 1;
+      }
+    }
+
+    // 5. Trigger victory if target reached
+    teamScores.forEach((owner, count) {
       if (count >= winTarget && !isGameOver) {
         _triggerVictory(owner);
       }
